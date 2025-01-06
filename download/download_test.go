@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/open-policy-agent/opa/ast"
 	"github.com/open-policy-agent/opa/bundle"
 	"github.com/open-policy-agent/opa/logging"
 	"github.com/open-policy-agent/opa/logging/test"
@@ -488,6 +489,235 @@ func TestOneShotWithBundleEtag(t *testing.T) {
 	}
 }
 
+func TestOneShotV1Compatible(t *testing.T) {
+	tests := []struct {
+		note         string
+		v1Compatible bool
+		bundlePath   string
+		expErrs      []string
+	}{
+		{
+			note:       "v0.x, keywords not used",
+			bundlePath: "/bundles/test/v1compat/keywords_not_used",
+		},
+		{
+			note:       "v0.x, keywords used, not imported",
+			bundlePath: "/bundles/test/v1compat/no_imports",
+			expErrs: []string{
+				"rego_parse_error: var cannot be used for rule name",
+				"rego_parse_error: number cannot be used for rule name",
+			},
+		},
+		{
+			note:       "v0.x, keywords used, rego.v1 imported",
+			bundlePath: "/bundles/test/v1compat/rego_import",
+		},
+
+		{
+			note:         "v1.0, keywords not used",
+			v1Compatible: true,
+			bundlePath:   "/bundles/test/v1compat/keywords_not_used",
+			expErrs: []string{
+				"rego_parse_error: `if` keyword is required before rule body",
+				"rego_parse_error: `contains` keyword is required for partial set rules",
+			},
+		},
+		{
+			note:         "v1.0, keywords used, not imported",
+			v1Compatible: true,
+			bundlePath:   "/bundles/test/v1compat/no_imports",
+		},
+		{
+			note:         "v1.0, keywords used, rego.v1 imported",
+			v1Compatible: true,
+			bundlePath:   "/bundles/test/v1compat/rego_import",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.note, func(t *testing.T) {
+			regoVersion := ast.RegoV0
+			if tc.v1Compatible {
+				regoVersion = ast.RegoV1
+			}
+			popts := ast.ParserOptions{RegoVersion: regoVersion}
+			ctx := context.Background()
+			fixture := newTestFixture(t)
+			fixture.d = New(Config{}, fixture.client, tc.bundlePath).
+				WithBundleParserOpts(popts).
+				WithCallback(fixture.oneShot)
+			fixture.server.expEtag = "some etag value"
+			defer fixture.server.stop()
+
+			// check etag on the downloader is empty
+			if fixture.d.etag != "" {
+				t.Fatalf("Expected empty downloader ETag but got %v", fixture.d.etag)
+			}
+
+			// simulate successful bundle activation and check updated etag on the downloader
+			fixture.server.expCode = 0
+			err := fixture.d.oneShot(ctx)
+
+			if tc.expErrs != nil {
+				if err == nil {
+					t.Fatal("Expected error but got nil")
+				}
+				for _, expErr := range tc.expErrs {
+					if !strings.Contains(err.Error(), expErr) {
+						t.Fatalf("Expected error to contain:\n\n%v\n\nbut got\n\n%v", expErr, err)
+					}
+				}
+			} else {
+				if err != nil {
+					t.Fatal("Unexpected:", err)
+				}
+
+				if fixture.d.etag != fixture.server.expEtag {
+					t.Fatalf("Expected downloader ETag %v but got %v", fixture.server.expEtag, fixture.d.etag)
+				}
+
+				if fixture.updates[0].Bundle == nil {
+					// 200 response on first request, bundle should be present
+					t.Errorf("Expected bundle in response")
+				}
+
+				if fixture.updates[0].Bundle.Etag != fixture.server.expEtag {
+					t.Fatalf("Expected bundle ETag %v but got %v", fixture.server.expEtag, fixture.updates[0].Bundle.Etag)
+				}
+			}
+		})
+	}
+}
+
+func TestOneShotWithBundleRegoVersion(t *testing.T) {
+	tests := []struct {
+		note              string
+		bundleRegoVersion int
+		module            string
+		expErrs           []string
+	}{
+		{
+			note:              "v0.x bundle, keywords not used",
+			bundleRegoVersion: 0,
+			module: `package test
+p[1] {
+	input.x == 2
+}`,
+		},
+		{
+			note:              "v0.x bundle, keywords used but not imported",
+			bundleRegoVersion: 0,
+			module: `package test
+p contains 1 if {
+	input.x == 2
+}`,
+			expErrs: []string{
+				"rego_parse_error: var cannot be used for rule name",
+				"rego_parse_error: number cannot be used for rule name",
+			},
+		},
+		{
+			note:              "v0.x bundle, keywords used, rego.v1 imported",
+			bundleRegoVersion: 0,
+			module: `package test
+import rego.v1
+p contains 1 if {
+	input.x == 2
+}`,
+		},
+
+		{
+			note:              "v1.0 bundle, keywords not used",
+			bundleRegoVersion: 1,
+			module: `package test
+p[1] {
+	input.x == 2
+}`,
+			expErrs: []string{
+				"rego_parse_error: `if` keyword is required before rule body",
+				"rego_parse_error: `contains` keyword is required for partial set rules",
+			},
+		},
+		{
+			note:              "v1.0 bundle, keywords used, not imported",
+			bundleRegoVersion: 1,
+			module: `package test
+p contains 1 if {
+	input.x == 2
+}`,
+		},
+		{
+			note:              "v1.0, keywords used, rego.v1 imported",
+			bundleRegoVersion: 1,
+			module: `package test
+import rego.v1
+p contains 1 if {
+	input.x == 2
+}`,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.note, func(t *testing.T) {
+			ctx := context.Background()
+			fixture := newTestFixture(t)
+			fixture.d = New(Config{}, fixture.client, "bundles/custom").
+				WithCallback(fixture.oneShot)
+			fixture.server.expEtag = "some etag value"
+
+			fixture.server.bundles["custom"] = bundle.Bundle{
+				Manifest: bundle.Manifest{RegoVersion: &tc.bundleRegoVersion},
+				Data:     map[string]interface{}{},
+				Modules: []bundle.ModuleFile{
+					{
+						Path: "test.rego",
+						Raw:  []byte(tc.module),
+					},
+				},
+			}
+
+			defer fixture.server.stop()
+
+			// check etag on the downloader is empty
+			if fixture.d.etag != "" {
+				t.Fatalf("Expected empty downloader ETag but got %v", fixture.d.etag)
+			}
+
+			// simulate successful bundle activation and check updated etag on the downloader
+			fixture.server.expCode = 0
+			err := fixture.d.oneShot(ctx)
+
+			if tc.expErrs != nil {
+				if err == nil {
+					t.Fatal("Expected error but got nil")
+				}
+				for _, expErr := range tc.expErrs {
+					if !strings.Contains(err.Error(), expErr) {
+						t.Fatalf("Expected error to contain:\n\n%v\n\nbut got\n\n%v", expErr, err)
+					}
+				}
+			} else {
+				if err != nil {
+					t.Fatal("Unexpected:", err)
+				}
+
+				if fixture.d.etag != fixture.server.expEtag {
+					t.Fatalf("Expected downloader ETag %v but got %v", fixture.server.expEtag, fixture.d.etag)
+				}
+
+				if fixture.updates[0].Bundle == nil {
+					// 200 response on first request, bundle should be present
+					t.Errorf("Expected bundle in response")
+				}
+
+				if fixture.updates[0].Bundle.Etag != fixture.server.expEtag {
+					t.Fatalf("Expected bundle ETag %v but got %v", fixture.server.expEtag, fixture.updates[0].Bundle.Etag)
+				}
+			}
+		})
+	}
+}
+
 func TestFailureAuthn(t *testing.T) {
 
 	ctx := context.Background()
@@ -537,6 +767,51 @@ func TestFailureUnexpected(t *testing.T) {
 	}
 	if hErr.StatusCode != 500 {
 		t.Fatal("expected status code 500")
+	}
+}
+
+func TestFailureUnexpectedWithResponseBody(t *testing.T) {
+
+	ctx := context.Background()
+
+	expResp := "this is a bad http response"
+
+	fixture := newTestFixture(t)
+	fixture.server.expCode = 500
+	fixture.server.expResp = expResp
+
+	defer fixture.server.stop()
+
+	d := New(Config{}, fixture.client, "/bundles/test/bundle1")
+
+	logger := test.New()
+	logger.SetLevel(logging.Debug)
+	d.logger = logger
+
+	err := d.oneShot(ctx)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	var hErr HTTPError
+	if !errors.As(err, &hErr) {
+		t.Fatal("expected HTTPError")
+	}
+	if hErr.StatusCode != 500 {
+		t.Fatal("expected status code 500")
+	}
+
+	expectLogged := fmt.Sprintf("bundle download error response with response body: %s", expResp)
+
+	var found bool
+	for _, entry := range logger.Entries() {
+		if entry.Message == expectLogged {
+			found = true
+			break
+		}
+	}
+
+	if !found {
+		t.Errorf("Expected log entry: %s", expectLogged)
 	}
 }
 

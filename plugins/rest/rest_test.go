@@ -624,6 +624,56 @@ func TestNew(t *testing.T) {
 			},
 		},
 		{
+			name: "S3AssumeRoleMissingEnvVars",
+			input: `{
+				"name": "foo",
+				"url": "http://localhost",
+				"credentials": {
+					"s3_signing": {
+						"assume_role_credentials": {}
+					},
+				}
+			}`,
+			wantErr: true,
+		},
+		{
+			name: "S3AssumeRoleCredsMissingSigningPlugin",
+			input: `{
+				"name": "foo",
+				"url": "http://localhost",
+				"credentials": {
+					"s3_signing": {
+						"assume_role_credentials": {}
+					},
+				}
+			}`,
+			env: map[string]string{
+				awsRoleArnEnvVar: "TEST",
+				accessKeyEnvVar:  "TEST",
+				secretKeyEnvVar:  "TEST",
+				awsRegionEnvVar:  "us-west-1",
+			},
+			wantErr: true,
+		},
+		{
+			name: "S3AssumeRoleCreds",
+			input: `{
+				"name": "foo",
+				"url": "http://localhost",
+				"credentials": {
+					"s3_signing": {
+						"assume_role_credentials": {"aws_signing": {"environment_credentials": {}}}
+					},
+				}
+			}`,
+			env: map[string]string{
+				awsRoleArnEnvVar: "TEST",
+				accessKeyEnvVar:  "TEST",
+				secretKeyEnvVar:  "TEST",
+				awsRegionEnvVar:  "us-west-1",
+			},
+		},
+		{
 			name: "ValidGCPMetadataIDTokenOptions",
 			input: `{
 				"name": "foo",
@@ -719,6 +769,38 @@ func TestNew(t *testing.T) {
         }
 			}`,
 			wantErr: true,
+		},
+		{
+			name: "Oauth2CredsClientAssertionPath",
+			input: fmt.Sprintf(`{
+				"name": "foo",
+				"url": "http://localhost",
+				"credentials": {
+					"oauth2": {
+						"grant_type": %q,
+						"token_url": "https://localhost",
+						"client_id": "client_one",
+						"client_assertion_path": "/some/file",
+						"scopes": ["profile", "opa"]
+					}
+				}
+			}`, grantTypeClientCredentials),
+		},
+		{
+			name: "Oauth2CredsClientAssertion",
+			input: fmt.Sprintf(`{
+				"name": "foo",
+				"url": "http://localhost",
+				"credentials": {
+					"oauth2": {
+						"grant_type": %q,
+						"token_url": "https://localhost",
+						"client_id": "client_one",
+						"client_assertion": "assertive",
+						"scopes": ["profile", "opa"]
+					}
+				}
+			}`, grantTypeClientCredentials),
 		},
 	}
 
@@ -872,7 +954,7 @@ func TestDoWithDistributedTracingOpts(t *testing.T) {
 	tracing.RegisterHTTPTracing(&mock)
 
 	body := "Some Bad Request was received"
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
 		fmt.Fprintln(w, body)
 	}))
@@ -907,7 +989,7 @@ func TestDoWithResponseInClientLog(t *testing.T) {
 	ctx := context.Background()
 
 	body := "Some Bad Request was received"
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
 		fmt.Fprintln(w, body)
 	}))
@@ -941,7 +1023,7 @@ func TestDoWithResponseInClientLog(t *testing.T) {
 func TestDoWithTruncatedResponseInClientLog(t *testing.T) {
 	ctx := context.Background()
 
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
 		fmt.Fprintln(w, strings.Repeat("Some Bad Request was received", 50))
 	}))
@@ -1442,7 +1524,7 @@ func TestOauth2ClientCredentials(t *testing.T) {
 			defer tc.ots.stop()
 
 			if tc.options == nil {
-				tc.options = func(c *Config) {}
+				tc.options = func(_ *Config) {}
 			}
 
 			client := newOauth2TestClient(t, tc.ts, tc.ots, tc.options)
@@ -1717,7 +1799,7 @@ func TestS3SigningInstantiationInitializesLogger(t *testing.T) {
 	authPlugin := &awsSigningAuthPlugin{
 		AWSEnvironmentCredentials: &awsEnvironmentCredentialService{},
 	}
-	client, err := New([]byte(config), map[string]*keys.Config{}, AuthPluginLookup(func(name string) HTTPAuthPlugin {
+	client, err := New([]byte(config), map[string]*keys.Config{}, AuthPluginLookup(func(_ string) HTTPAuthPlugin {
 		return authPlugin
 	}))
 	if err != nil {
@@ -1881,6 +1963,7 @@ func TestAWSCredentialServiceChain(t *testing.T) {
 
 func TestDebugLoggingRequestMaskAuthorizationHeader(t *testing.T) {
 	token := "secret"
+	plaintext := "plaintext"
 	ts := testServer{t: t, expBearerToken: token}
 	ts.start()
 	defer ts.stop()
@@ -1892,8 +1975,12 @@ func TestDebugLoggingRequestMaskAuthorizationHeader(t *testing.T) {
 			"bearer": {
 				"token": %q
 			}
+		},
+		"headers": {
+			"X-AMZ-SECURITY-TOKEN": %q,
+			"remains-unmasked": %q
 		}
-	}`, ts.server.URL, token)
+	}`, ts.server.URL, token, token, plaintext)
 	client, err := New([]byte(config), map[string]*keys.Config{})
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
@@ -1908,21 +1995,22 @@ func TestDebugLoggingRequestMaskAuthorizationHeader(t *testing.T) {
 		t.Fatalf("Unexpected error: %v", err)
 	}
 
-	var reqLogFound bool
-	for _, entry := range logger.Entries() {
-		if entry.Fields["headers"] != nil {
-			headers := entry.Fields["headers"].(http.Header)
-			authzHeader := headers.Get("Authorization")
-			if authzHeader != "" {
-				reqLogFound = true
-				if authzHeader != "REDACTED" {
-					t.Errorf("Excpected redacted Authorization header value, got %v", authzHeader)
-				}
-			}
-		}
+	entries := logger.Entries()
+	if len(entries) != 2 {
+		t.Fatalf("Expected 2 log entries, got %d", len(entries))
 	}
-	if !reqLogFound {
-		t.Fatalf("Expected log entry from request")
+
+	requestEntry := entries[0]
+	headers := requestEntry.Fields["headers"].(http.Header)
+	for k := range headers {
+		v := headers.Get(k)
+		if _, ok := maskedHeaderKeys[k]; ok {
+			if v != "REDACTED" {
+				t.Errorf("Expected redacted %q header value, got %v", k, v)
+			}
+		} else if k == "Remains-Unmasked" && v != plaintext {
+			t.Errorf("Expected %q header to have value %q, got %v", k, plaintext, v)
+		}
 	}
 }
 
@@ -2391,7 +2479,7 @@ func getTestServerWithTimeout(d time.Duration) (baseURL string, teardownFn func(
 	mux := http.NewServeMux()
 	ts := httptest.NewServer(mux)
 
-	mux.HandleFunc("/v1/test", func(w http.ResponseWriter, req *http.Request) {
+	mux.HandleFunc("/v1/test", func(w http.ResponseWriter, _ *http.Request) {
 		time.Sleep(d * time.Second)
 		w.WriteHeader(http.StatusOK)
 	})

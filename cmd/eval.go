@@ -20,6 +20,7 @@ import (
 	"github.com/open-policy-agent/opa/ast"
 	"github.com/open-policy-agent/opa/ast/location"
 	"github.com/open-policy-agent/opa/bundle"
+	"github.com/open-policy-agent/opa/cmd/internal/env"
 	"github.com/open-policy-agent/opa/compile"
 	"github.com/open-policy-agent/opa/cover"
 	fileurl "github.com/open-policy-agent/opa/internal/file/url"
@@ -70,6 +71,8 @@ type evalCommandParams struct {
 	optimizationLevel   int
 	entrypoints         repeatedStringFlag
 	strict              bool
+	v1Compatible        bool
+	traceVarValues      bool
 }
 
 func newEvalCommandParams() evalCommandParams {
@@ -269,9 +272,12 @@ access.
 `,
 
 		PreRunE: func(cmd *cobra.Command, args []string) error {
-			return validateEvalParams(&params, args)
+			if err := validateEvalParams(&params, args); err != nil {
+				return err
+			}
+			return env.CmdFlags.CheckEnvironmentVariables(cmd)
 		},
-		Run: func(cmd *cobra.Command, args []string) {
+		Run: func(_ *cobra.Command, args []string) {
 
 			defined, err := eval(args, params, os.Stdout)
 			if err != nil {
@@ -302,9 +308,9 @@ access.
 	evalCommand.Flags().VarP(&params.prettyLimit, "pretty-limit", "", "set limit after which pretty output gets truncated")
 	evalCommand.Flags().BoolVarP(&params.failDefined, "fail-defined", "", false, "exits with non-zero exit code on defined/non-empty result and errors")
 	evalCommand.Flags().DurationVar(&params.timeout, "timeout", 0, "set eval timeout (default unlimited)")
-
 	evalCommand.Flags().IntVarP(&params.optimizationLevel, "optimize", "O", 0, "set optimization level")
 	evalCommand.Flags().VarP(&params.entrypoints, "entrypoint", "e", "set slash separated entrypoint path")
+	evalCommand.Flags().BoolVar(&params.traceVarValues, "var-values", false, "show local variable values in pretty trace output")
 
 	// Shared flags
 	addCapabilitiesFlag(evalCommand.Flags(), params.capabilities)
@@ -326,6 +332,7 @@ access.
 	addTargetFlag(evalCommand.Flags(), params.target)
 	addCountFlag(evalCommand.Flags(), &params.count, "benchmark")
 	addStrictFlag(evalCommand.Flags(), &params.strict, false)
+	addV1CompatibleFlag(evalCommand.Flags(), &params.v1Compatible, false)
 
 	RootCommand.AddCommand(evalCommand)
 }
@@ -392,7 +399,12 @@ func eval(args []string, params evalCommandParams, w io.Writer) (bool, error) {
 	case evalValuesOutput:
 		err = pr.Values(w, result)
 	case evalPrettyOutput:
-		err = pr.Pretty(w, result)
+		err = pr.PrettyWithOptions(w, result, pr.PrettyOptions{
+			TraceOpts: topdown.PrettyTraceOptions{
+				Locations:     true,
+				ExprVariables: ectx.params.traceVarValues,
+			},
+		})
 	case evalSourceOutput:
 		err = pr.Source(w, result)
 	case evalRawOutput:
@@ -661,6 +673,10 @@ func setupEval(args []string, params evalCommandParams) (*evalContext, error) {
 
 	if params.strict {
 		regoArgs = append(regoArgs, rego.Strict(params.strict))
+	}
+
+	if params.v1Compatible {
+		regoArgs = append(regoArgs, rego.SetRegoVersion(ast.RegoV1))
 	}
 
 	evalCtx := &evalContext{

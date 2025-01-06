@@ -5,6 +5,7 @@
 package rest
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/json"
@@ -350,6 +351,23 @@ func TestMetadataCredentialService(t *testing.T) {
 	_, err = cs.credentials(context.Background())
 	assertErr("metadata endpoint cannot be determined from settings and environment", err, t)
 
+	// wrong path: missing token
+	t.Setenv(ecsFullPathEnvVar, "fullPath")
+	os.Unsetenv(ecsAuthorizationTokenEnvVar)
+	_, err = cs.credentials(context.Background())
+	assertErr("unable to get ECS metadata authorization token", err, t)
+	os.Unsetenv(ecsFullPathEnvVar)
+
+	test.WithTempFS(nil, func(path string) {
+		// wrong path: bad file token
+		t.Setenv(ecsFullPathEnvVar, "fullPath")
+		os.Setenv(ecsAuthorizationTokenFileEnvVar, filepath.Join(path, "bad-file"))
+		_, err = cs.credentials(context.Background())
+		assertErr("failed to read ECS metadata authorization token from file", err, t)
+		os.Unsetenv(ecsFullPathEnvVar)
+		os.Unsetenv(ecsAuthorizationTokenFileEnvVar)
+	})
+
 	// wrong path: creds not found
 	cs = awsMetadataCredentialService{
 		RoleName:        "not_my_iam_role", // not present
@@ -489,6 +507,67 @@ func TestMetadataCredentialService(t *testing.T) {
 	assertEq(creds.SecretKey, ts.payload.SecretAccessKey, t)
 	assertEq(creds.RegionName, cs.RegionName, t)
 	assertEq(creds.SessionToken, ts.payload.Token, t)
+
+	// happy path: credentials fetched from full path var
+	cs = awsMetadataCredentialService{
+		RegionName:      "us-east-1",
+		credServicePath: "", // not set as we want to test env var resolution
+		logger:          logging.Get(),
+	}
+	ts.payload = metadataPayload{
+		AccessKeyID:     "MYAWSACCESSKEYGOESHERE",
+		SecretAccessKey: "MYAWSSECRETACCESSKEYGOESHERE",
+		Code:            "Success",
+		Token:           "MYAWSSECURITYTOKENGOESHERE",
+		Expiration:      time.Now().UTC().Add(time.Minute * 2)} // short time
+	t.Setenv(ecsFullPathEnvVar, ts.server.URL+"/fullPath")
+	t.Setenv(ecsAuthorizationTokenEnvVar, "THIS_IS_A_GOOD_TOKEN")
+
+	creds, err = cs.credentials(context.Background())
+	if err != nil {
+		// Cannot proceed with test if unable to fetch credentials.
+		t.Fatal(err)
+	}
+
+	assertEq(creds.AccessKey, ts.payload.AccessKeyID, t)
+	assertEq(creds.SecretKey, ts.payload.SecretAccessKey, t)
+	assertEq(creds.RegionName, cs.RegionName, t)
+	assertEq(creds.SessionToken, ts.payload.Token, t)
+	os.Unsetenv(ecsFullPathEnvVar)
+	os.Unsetenv(ecsAuthorizationTokenEnvVar)
+
+	// happy path: credentials fetched from full path var using token from filesystem
+	files := map[string]string{
+		"good_token_file": "THIS_IS_A_GOOD_TOKEN",
+	}
+	test.WithTempFS(files, func(path string) {
+		// happy path: credentials fetched from full path var
+		cs = awsMetadataCredentialService{
+			RegionName:      "us-east-1",
+			credServicePath: "", // not set as we want to test env var resolution
+			logger:          logging.Get(),
+		}
+		ts.payload = metadataPayload{
+			AccessKeyID:     "MYAWSACCESSKEYGOESHERE",
+			SecretAccessKey: "MYAWSSECRETACCESSKEYGOESHERE",
+			Code:            "Success",
+			Token:           "MYAWSSECURITYTOKENGOESHERE",
+			Expiration:      time.Now().UTC().Add(time.Minute * 2)} // short time
+		t.Setenv(ecsFullPathEnvVar, ts.server.URL+"/fullPath")
+		t.Setenv(ecsAuthorizationTokenFileEnvVar, filepath.Join(path, "good_token_file"))
+		creds, err = cs.credentials(context.Background())
+		if err != nil {
+			// Cannot proceed with test if unable to fetch credentials.
+			t.Fatal(err)
+		}
+
+		assertEq(creds.AccessKey, ts.payload.AccessKeyID, t)
+		assertEq(creds.SecretKey, ts.payload.SecretAccessKey, t)
+		assertEq(creds.RegionName, cs.RegionName, t)
+		assertEq(creds.SessionToken, ts.payload.Token, t)
+		os.Unsetenv(ecsFullPathEnvVar)
+		os.Unsetenv(ecsAuthorizationTokenFileEnvVar)
+	})
 }
 
 func TestMetadataServiceErrorHandled(t *testing.T) {
@@ -577,6 +656,84 @@ func TestV4Signing(t *testing.T) {
 		assertIn(test.expectedAuthorization, req.Header.Get("Authorization"), t)
 		assertEq("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
 			req.Header.Get("X-Amz-Content-Sha256"), t)
+		assertEq("20190424T181457Z", req.Header.Get("X-Amz-Date"), t)
+		assertEq("MYAWSSECURITYTOKENGOESHERE", req.Header.Get("X-Amz-Security-Token"), t)
+	}
+}
+
+func TestV4SigningUnsignedPayload(t *testing.T) {
+	ts := ec2CredTestServer{}
+	ts.start()
+	defer ts.stop()
+
+	// happy path: sign correctly
+	cs := &awsMetadataCredentialService{
+		RoleName:        "my_iam_role", // not present
+		RegionName:      "us-east-1",
+		credServicePath: ts.server.URL + "/latest/meta-data/iam/security-credentials/",
+		tokenPath:       ts.server.URL + "/latest/api/token",
+		logger:          logging.Get(),
+	}
+	ts.payload = metadataPayload{
+		AccessKeyID:     "MYAWSACCESSKEYGOESHERE",
+		SecretAccessKey: "MYAWSSECRETACCESSKEYGOESHERE",
+		Code:            "Success",
+		Token:           "MYAWSSECURITYTOKENGOESHERE",
+		Expiration:      time.Now().UTC().Add(time.Minute * 2)}
+
+	// force a non-random source so that we can predict the v4a signing key and, thus, signature
+	myReader := strings.NewReader("000000000000000000000000000000000")
+	aws.SetRandomSource(myReader)
+	defer func() { aws.SetRandomSource(rand.Reader) }()
+
+	tests := []struct {
+		disablePayloadSigning bool
+		expectedAuthorization []string
+		expectedShaHeaderVal  string
+	}{
+		{
+			disablePayloadSigning: true,
+			expectedAuthorization: []string{
+				"AWS4-HMAC-SHA256 Credential=MYAWSACCESSKEYGOESHERE/20190424/us-east-1/s3/aws4_request," +
+					"SignedHeaders=host;x-amz-content-sha256;x-amz-date;x-amz-security-token," +
+					"Signature=3682e55f6d86d3372003b3d28c74aa960f076d91fce833b129ae76415a12e5e4",
+			},
+			expectedShaHeaderVal: "UNSIGNED-PAYLOAD",
+		},
+		{
+			disablePayloadSigning: false,
+			expectedAuthorization: []string{
+				"AWS4-HMAC-SHA256 Credential=MYAWSACCESSKEYGOESHERE/20190424/us-east-1/s3/aws4_request," +
+					"SignedHeaders=host;x-amz-content-sha256;x-amz-date;x-amz-security-token," +
+					"Signature=d3f0561abae5e35d9ee2c15e678bb7acacc4b4743707a8f7fbcbfdb519078990",
+			},
+			expectedShaHeaderVal: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+		},
+	}
+	for _, test := range tests {
+		creds, err := cs.credentials(context.Background())
+		if err != nil {
+			t.Fatal("unexpected error getting credentials")
+		}
+		req, _ := http.NewRequest("GET", "https://mybucket.s3.amazonaws.com/bundle.tar.gz", strings.NewReader(""))
+		var body []byte
+		if req.Body == nil {
+			body = []byte("")
+		} else {
+			body, _ = io.ReadAll(req.Body)
+			req.Body = io.NopCloser(bytes.NewReader(body))
+		}
+
+		authHeader, awsHeaders := aws.SignV4(req.Header, req.Method, req.URL, body, "s3", creds, time.Unix(1556129697, 0).UTC(), test.disablePayloadSigning)
+		req.Header.Set("Authorization", authHeader)
+		for k, v := range awsHeaders {
+			req.Header.Add(k, v)
+		}
+
+		// expect mandatory headers
+		assertEq("mybucket.s3.amazonaws.com", req.Header.Get("Host"), t)
+		assertIn(test.expectedAuthorization, req.Header.Get("Authorization"), t)
+		assertEq(test.expectedShaHeaderVal, req.Header.Get("X-Amz-Content-Sha256"), t)
 		assertEq("20190424T181457Z", req.Header.Get("X-Amz-Date"), t)
 		assertEq("MYAWSSECURITYTOKENGOESHERE", req.Header.Get("X-Amz-Security-Token"), t)
 	}
@@ -878,6 +1035,7 @@ type ec2CredTestServer struct {
 func (t *ec2CredTestServer) handle(w http.ResponseWriter, r *http.Request) {
 	goodPath := "/latest/meta-data/iam/security-credentials/my_iam_role"
 	badPath := "/latest/meta-data/iam/security-credentials/my_bad_iam_role"
+	goodPathFull := "/fullPath"
 
 	goodTokenPath := "/latest/api/token"
 	badTokenPath := "/latest/api/bad_token"
@@ -908,6 +1066,15 @@ func (t *ec2CredTestServer) handle(w http.ResponseWriter, r *http.Request) {
 		// a metadata response that's not well-formed
 		w.WriteHeader(200)
 		_, _ = w.Write([]byte("This isn't a JSON payload"))
+	case goodPathFull:
+		// validate token...
+		if r.Header.Get("Authorization") == tokenValue {
+			w.WriteHeader(200)
+			_, _ = w.Write(jsonBytes)
+		} else {
+			// AWS returns a 404 if the token is wrong
+			w.WriteHeader(404)
+		}
 	default:
 		// something else that we won't be able to find
 		w.WriteHeader(404)
@@ -927,8 +1094,9 @@ func TestWebIdentityCredentialService(t *testing.T) {
 
 	testAccessKey := "ASgeIAIOSFODNN7EXAMPLE"
 	ts := stsTestServer{
-		t:         t,
-		accessKey: testAccessKey,
+		t:                         t,
+		accessKey:                 testAccessKey,
+		assumeRoleWithWebIdentity: true,
 	}
 	ts.start()
 	defer ts.stop()
@@ -1011,6 +1179,255 @@ func TestWebIdentityCredentialService(t *testing.T) {
 		creds, err = cs.credentials(context.Background())
 		assertErr("failed to parse credential response from STS service: EOF", err, t)
 	})
+}
+
+func TestAssumeRoleCredentialServiceUsingWrongSigningProvider(t *testing.T) {
+	t.Setenv("AWS_REGION", "us-west-1")
+
+	testAccessKey := "ASgeIAIOSFODNN7EXAMPLE"
+	ts := stsTestServer{
+		t:                         t,
+		accessKey:                 testAccessKey,
+		assumeRoleWithWebIdentity: false,
+	}
+	ts.start()
+	defer ts.stop()
+	cs := awsAssumeRoleCredentialService{
+		stsURL: ts.server.URL,
+		logger: logging.Get(),
+	}
+
+	// wrong path: no AWS signing plugin
+	err := cs.populateFromEnv()
+	assertErr("a AWS signing plugin must be specified when AssumeRole credential provider is enabled", err, t)
+
+	// wrong path: unsupported AWS signing plugin
+	cs.AWSSigningPlugin = &awsSigningAuthPlugin{AWSWebIdentityCredentials: &awsWebIdentityCredentialService{}}
+	err = cs.populateFromEnv()
+	assertErr("unsupported AWS signing plugin with AssumeRole credential provider", err, t)
+}
+
+func TestAssumeRoleCredentialServiceUsingEnvCredentialsProvider(t *testing.T) {
+	t.Setenv("AWS_REGION", "us-west-1")
+
+	testAccessKey := "ASgeIAIOSFODNN7EXAMPLE"
+	ts := stsTestServer{
+		t:                         t,
+		accessKey:                 testAccessKey,
+		assumeRoleWithWebIdentity: false,
+	}
+	ts.start()
+	defer ts.stop()
+	cs := awsAssumeRoleCredentialService{
+		stsURL:           ts.server.URL,
+		logger:           logging.Get(),
+		AWSSigningPlugin: &awsSigningAuthPlugin{AWSEnvironmentCredentials: &awsEnvironmentCredentialService{}},
+	}
+
+	// wrong path: no AWS IAM Role ARN set in environment or config
+	err := cs.populateFromEnv()
+	assertErr("no AWS_ROLE_ARN set in environment or configuration", err, t)
+	t.Setenv("AWS_ROLE_ARN", "role:arn")
+
+	// happy path: set AWS IAM Role ARN as env var
+	err = cs.populateFromEnv()
+	if err != nil {
+		t.Fatalf("Error while getting env vars: %s", err)
+	}
+
+	// happy path: set AWS IAM Role ARN in config
+	os.Unsetenv("AWS_ROLE_ARN")
+	cs.RoleArn = "role:arn"
+
+	err = cs.populateFromEnv()
+	if err != nil {
+		t.Fatalf("Error while getting env vars: %s", err)
+	}
+
+	// wrong path: refresh and get credentials but signing credentials not set via env variables
+	_, err = cs.credentials(context.Background())
+	assertErr("no AWS_ACCESS_KEY_ID set in environment", err, t)
+
+	t.Setenv("AWS_ACCESS_KEY_ID", "MYAWSACCESSKEYGOESHERE")
+
+	_, err = cs.credentials(context.Background())
+	assertErr("no AWS_SECRET_ACCESS_KEY set in environment", err, t)
+
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "MYAWSSECRETACCESSKEYGOESHERE")
+
+	// happy path: refresh and get credentials
+	creds, _ := cs.credentials(context.Background())
+	assertEq(creds.AccessKey, testAccessKey, t)
+
+	// happy path: refresh with session and get credentials
+	cs.expiration = time.Now()
+	cs.SessionName = "TEST_SESSION"
+	creds, _ = cs.credentials(context.Background())
+	assertEq(creds.AccessKey, testAccessKey, t)
+
+	// happy path: don't refresh as credentials not expired so STS not called
+	// verify existing credentials haven't changed
+	ts.accessKey = "OTHERKEY"
+	creds, _ = cs.credentials(context.Background())
+	assertEq(creds.AccessKey, testAccessKey, t)
+
+	// happy path: refresh expired credentials
+	// verify new credentials are set
+	cs.expiration = time.Now()
+	creds, _ = cs.credentials(context.Background())
+	assertEq(creds.AccessKey, ts.accessKey, t)
+}
+
+func TestAssumeRoleCredentialServiceUsingProfileCredentialsProvider(t *testing.T) {
+	t.Setenv("AWS_REGION", "us-west-1")
+
+	testAccessKey := "ASgeIAIOSFODNN7EXAMPLE"
+	ts := stsTestServer{
+		t:                         t,
+		accessKey:                 testAccessKey,
+		assumeRoleWithWebIdentity: false,
+	}
+	ts.start()
+	defer ts.stop()
+
+	defaultKey := "MYAWSACCESSKEYGOESHERE"
+	defaultSecret := "MYAWSSECRETACCESSKEYGOESHERE"
+	defaultSessionToken := "AQoEXAMPLEH4aoAH0gNCAPy"
+
+	config := fmt.Sprintf(`
+[foo]
+aws_access_key_id=%v
+aws_secret_access_key=%v
+aws_session_token=%v
+`, defaultKey, defaultSecret, defaultSessionToken)
+
+	files := map[string]string{
+		"example.ini": config,
+	}
+
+	test.WithTempFS(files, func(path string) {
+		cfgPath := filepath.Join(path, "example.ini")
+
+		cs := awsAssumeRoleCredentialService{
+			stsURL:           ts.server.URL,
+			logger:           logging.Get(),
+			AWSSigningPlugin: &awsSigningAuthPlugin{AWSProfileCredentials: &awsProfileCredentialService{Path: cfgPath, Profile: "foo"}},
+		}
+
+		// wrong path: no AWS IAM Role ARN set in environment or config
+		err := cs.populateFromEnv()
+		assertErr("no AWS_ROLE_ARN set in environment or configuration", err, t)
+		t.Setenv("AWS_ROLE_ARN", "role:arn")
+
+		// happy path: set AWS IAM Role ARN as env var
+		err = cs.populateFromEnv()
+		if err != nil {
+			t.Fatalf("Error while getting env vars: %s", err)
+		}
+
+		// happy path: set AWS IAM Role ARN in config
+		os.Unsetenv("AWS_ROLE_ARN")
+		cs.RoleArn = "role:arn"
+
+		err = cs.populateFromEnv()
+		if err != nil {
+			t.Fatalf("Error while getting env vars: %s", err)
+		}
+
+		// happy path: refresh and get credentials
+		creds, _ := cs.credentials(context.Background())
+		assertEq(creds.AccessKey, testAccessKey, t)
+
+		// happy path: refresh with session and get credentials
+		cs.expiration = time.Now()
+		cs.SessionName = "TEST_SESSION"
+		creds, _ = cs.credentials(context.Background())
+		assertEq(creds.AccessKey, testAccessKey, t)
+
+		// happy path: don't refresh as credentials not expired so STS not called
+		// verify existing credentials haven't changed
+		ts.accessKey = "OTHERKEY"
+		creds, _ = cs.credentials(context.Background())
+		assertEq(creds.AccessKey, testAccessKey, t)
+
+		// happy path: refresh expired credentials
+		// verify new credentials are set
+		cs.expiration = time.Now()
+		creds, _ = cs.credentials(context.Background())
+		assertEq(creds.AccessKey, ts.accessKey, t)
+	})
+}
+
+func TestAssumeRoleCredentialServiceUsingMetadataCredentialsProvider(t *testing.T) {
+	t.Setenv("AWS_REGION", "us-west-1")
+
+	testAccessKey := "ASgeIAIOSFODNN7EXAMPLE"
+	ts := stsTestServer{
+		t:                         t,
+		accessKey:                 testAccessKey,
+		assumeRoleWithWebIdentity: false,
+	}
+	ts.start()
+	defer ts.stop()
+
+	tsMetadata := ec2CredTestServer{}
+	tsMetadata.payload = metadataPayload{
+		AccessKeyID:     "MYAWSACCESSKEYGOESHERE",
+		SecretAccessKey: "MYAWSSECRETACCESSKEYGOESHERE",
+		Code:            "Success",
+		Token:           "MYAWSSECURITYTOKENGOESHERE",
+		Expiration:      time.Now().UTC().Add(time.Minute * 300)}
+	tsMetadata.start()
+	defer tsMetadata.stop()
+
+	cs := awsAssumeRoleCredentialService{
+		stsURL: ts.server.URL,
+		logger: logging.Get(),
+		AWSSigningPlugin: &awsSigningAuthPlugin{AWSMetadataCredentials: &awsMetadataCredentialService{RoleName: "my_iam_role", credServicePath: tsMetadata.server.URL + "/latest/meta-data/iam/security-credentials/",
+			tokenPath: tsMetadata.server.URL + "/latest/api/token"}},
+	}
+
+	// wrong path: no AWS IAM Role ARN set in environment or config
+	err := cs.populateFromEnv()
+	assertErr("no AWS_ROLE_ARN set in environment or configuration", err, t)
+	t.Setenv("AWS_ROLE_ARN", "role:arn")
+
+	// happy path: set AWS IAM Role ARN as env var
+	err = cs.populateFromEnv()
+	if err != nil {
+		t.Fatalf("Error while getting env vars: %s", err)
+	}
+
+	// happy path: set AWS IAM Role ARN in config
+	os.Unsetenv("AWS_ROLE_ARN")
+	cs.RoleArn = "role:arn"
+
+	err = cs.populateFromEnv()
+	if err != nil {
+		t.Fatalf("Error while getting env vars: %s", err)
+	}
+
+	// happy path: refresh and get credentials
+	creds, _ := cs.credentials(context.Background())
+	assertEq(creds.AccessKey, testAccessKey, t)
+
+	// happy path: refresh with session and get credentials
+	cs.expiration = time.Now()
+	cs.SessionName = "TEST_SESSION"
+	creds, _ = cs.credentials(context.Background())
+	assertEq(creds.AccessKey, testAccessKey, t)
+
+	// happy path: don't refresh as credentials not expired so STS not called
+	// verify existing credentials haven't changed
+	ts.accessKey = "OTHERKEY"
+	creds, _ = cs.credentials(context.Background())
+	assertEq(creds.AccessKey, testAccessKey, t)
+
+	// happy path: refresh expired credentials
+	// verify new credentials are set
+	cs.expiration = time.Now()
+	creds, _ = cs.credentials(context.Background())
+	assertEq(creds.AccessKey, ts.accessKey, t)
 }
 
 func TestStsPath(t *testing.T) {
@@ -1107,11 +1524,12 @@ func TestStsPathFromEnv(t *testing.T) {
 	}
 }
 
-// simulate EC2 metadata service
+// simulate AWS Security Token Service (AWS STS)
 type stsTestServer struct {
-	t         *testing.T
-	server    *httptest.Server
-	accessKey string
+	t                         *testing.T
+	server                    *httptest.Server
+	accessKey                 string
+	assumeRoleWithWebIdentity bool
 }
 
 func (t *stsTestServer) handle(w http.ResponseWriter, r *http.Request) {
@@ -1120,7 +1538,12 @@ func (t *stsTestServer) handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := r.ParseForm(); err != nil || r.PostForm.Get("Action") != "AssumeRoleWithWebIdentity" {
+	if err := r.ParseForm(); err != nil {
+		w.WriteHeader(400)
+		return
+	}
+
+	if r.PostForm.Get("Action") != "AssumeRoleWithWebIdentity" && r.PostForm.Get("Action") != "AssumeRole" {
 		w.WriteHeader(400)
 		return
 	}
@@ -1131,17 +1554,22 @@ func (t *stsTestServer) handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	token := r.PostForm.Get("WebIdentityToken")
-	if token != "good-token" {
-		w.WriteHeader(401)
-		return
+	if t.assumeRoleWithWebIdentity {
+		token := r.PostForm.Get("WebIdentityToken")
+		if token != "good-token" {
+			w.WriteHeader(401)
+			return
+		}
+		w.WriteHeader(200)
 	}
-	w.WriteHeader(200)
 
 	sessionName := r.PostForm.Get("RoleSessionName")
 
-	// Taken from STS docs: https://docs.aws.amazon.com/STS/latest/APIReference/API_AssumeRoleWithWebIdentity.html
-	xmlResponse := `<AssumeRoleWithWebIdentityResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/">
+	var xmlResponse string
+
+	if t.assumeRoleWithWebIdentity {
+		// Taken from STS docs: https://docs.aws.amazon.com/STS/latest/APIReference/API_AssumeRoleWithWebIdentity.html
+		xmlResponse = `<AssumeRoleWithWebIdentityResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/">
 	<AssumeRoleWithWebIdentityResult>
 	  <SubjectFromWebIdentityToken>amzn1.account.AF6RHO7KZU5XRVQJGXK6HB56KR2A</SubjectFromWebIdentityToken>
 	  <Audience>client.5498841531868486423.1548@apps.example.com</Audience>
@@ -1161,6 +1589,36 @@ func (t *stsTestServer) handle(w http.ResponseWriter, r *http.Request) {
 	  <RequestId>ad4156e9-bce1-11e2-82e6-6b6efEXAMPLE</RequestId>
 	</ResponseMetadata>
   </AssumeRoleWithWebIdentityResponse>`
+	} else {
+		// Taken from STS docs: https://docs.aws.amazon.com/STS/latest/APIReference/API_AssumeRole.html
+		xmlResponse = `<AssumeRoleResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/">
+<AssumeRoleResult>
+<SourceIdentity>DevUser123</SourceIdentity>
+<AssumedRoleUser>
+  <Arn>arn:aws:sts::123456789012:assumed-role/demo/John</Arn>
+  <AssumedRoleId>ARO123EXAMPLE123:%[1]s</AssumedRoleId>
+</AssumedRoleUser>
+<Credentials>
+  <SessionToken>
+   AQoDYXdzEPT//////////wEXAMPLEtc764bNrC9SAPBSM22wDOk4x4HIZ8j4FZTwdQW
+   LWsKWHGBuFqwAeMicRXmxfpSPfIeoIYRqTflfKD8YUuwthAx7mSEI/qkPpKPi/kMcGd
+   QrmGdeehM4IC1NtBmUpp2wUE8phUZampKsburEDy0KPkyQDYwT7WZ0wq5VSXDvp75YU
+   9HFvlRd8Tx6q6fE8YQcHNVXAkiY9q6d+xo0rKwT38xVqr7ZD0u0iPPkUL64lIZbqBAz
+   +scqKmlzm8FDrypNC9Yjc8fPOLn9FX9KSYvKTr4rvx3iSIlTJabIQwj2ICCR/oLxBA==
+  </SessionToken>
+  <SecretAccessKey>
+   wJalrXUtnFEMI/K7MDENG/bPxRfiCYzEXAMPLEKEY
+  </SecretAccessKey>
+  <Expiration>%s</Expiration>
+  <AccessKeyId>%s</AccessKeyId>
+</Credentials>
+<PackedPolicySize>8</PackedPolicySize>
+</AssumeRoleResult>
+<ResponseMetadata>
+<RequestId>c6104cbe-af31-11e0-8154-cbc7ccf896c7</RequestId>
+</ResponseMetadata>
+</AssumeRoleResponse>`
+	}
 
 	_, _ = w.Write([]byte(fmt.Sprintf(xmlResponse, sessionName, time.Now().Add(time.Hour).Format(time.RFC3339), t.accessKey)))
 }
@@ -1211,6 +1669,54 @@ func TestECRAuthPluginRequestsAuthorizationToken(t *testing.T) {
 
 	got := req.Header.Get("Authorization")
 	want := "Basic secret"
+	if got != want {
+		t.Errorf("req.Header.Get(\"Authorization\") = %q, want %q", got, want)
+	}
+}
+
+func TestECRAuthPluginRequestsRedirection(t *testing.T) {
+	// Environment credentials to sign the ecr get authorization token request
+	t.Setenv(accessKeyEnvVar, "blablabla")
+	t.Setenv(secretKeyEnvVar, "tatata")
+	t.Setenv(awsRegionEnvVar, "us-east-1")
+	t.Setenv(sessionTokenEnvVar, "lalala")
+
+	ap := awsSigningAuthPlugin{
+		logger:                    logging.NewNoOpLogger(),
+		AWSEnvironmentCredentials: &awsEnvironmentCredentialService{},
+		host:                      "somewhere.com",
+		AWSService:                "ecr",
+	}
+
+	apECR := newECRAuthPlugin(&ap)
+	apECR.ecr = &ecrStub{token: aws.ECRAuthorizationToken{
+		AuthorizationToken: "secret",
+	}}
+
+	ap.ecrAuthPlugin = apECR
+
+	// Request to the host specified in the plugin configuration
+	req := httptest.NewRequest("", "http://somewhere.com", nil)
+
+	if err := ap.Prepare(req); err != nil {
+		t.Errorf("ecrAuthPlugin.Prepare() = %q", err)
+	}
+
+	got := req.Header.Get("Authorization")
+	want := "Basic secret"
+	if got != want {
+		t.Errorf("req.Header.Get(\"Authorization\") = %q, want %q", got, want)
+	}
+
+	// Redirection to another host
+	req = httptest.NewRequest("", "http://somewhere-else.com", nil)
+
+	if err := ap.Prepare(req); err != nil {
+		t.Errorf("ecrAuthPlugin.Prepare() = %q", err)
+	}
+
+	got = req.Header.Get("Authorization")
+	want = ""
 	if got != want {
 		t.Errorf("req.Header.Get(\"Authorization\") = %q, want %q", got, want)
 	}

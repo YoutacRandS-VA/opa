@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -17,6 +18,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/open-policy-agent/opa/internal/file/archive"
+	"github.com/open-policy-agent/opa/loader"
 
 	"github.com/open-policy-agent/opa/internal/report"
 	"github.com/open-policy-agent/opa/logging"
@@ -157,7 +161,7 @@ func testRuntimeProcessWatchEventPolicyError(t *testing.T, asBundle bool) {
 
 		ch := make(chan error)
 
-		testFunc := func(d time.Duration, err error) {
+		testFunc := func(_ time.Duration, err error) {
 			ch <- err
 		}
 
@@ -229,6 +233,380 @@ func testRuntimeProcessWatchEventPolicyError(t *testing.T, asBundle bool) {
 		}
 
 	})
+}
+
+func TestRuntimeReplWithBundleBuiltWithV1Compatibility(t *testing.T) {
+	ctx := context.Background()
+
+	test.WithTempFS(nil, func(rootDir string) {
+		p := filepath.Join(rootDir, "bundle.tar.gz")
+
+		mod := `package test
+			p := 7 if 3 < 4
+		`
+
+		files := [][2]string{
+			{"/.manifest", `{"revision": "foo", "rego_version": 1}`},
+			{"/x.rego", mod},
+		}
+
+		buf := archive.MustWriteTarGz(files)
+		bf, err := os.Create(p)
+		if err != nil {
+			t.Fatalf("Unexpected error: %v", err)
+		}
+		_, err = bf.Write(buf.Bytes())
+		if err != nil {
+			t.Fatalf("Unexpected error: %v", err)
+		}
+
+		output := test.BlockingWriter{}
+
+		params := NewParams()
+		params.Output = &output
+		params.Paths = []string{p}
+		params.BundleMode = true
+
+		rt, err := NewRuntime(ctx, params)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		go rt.StartREPL(ctx)
+
+		if !test.Eventually(t, 5*time.Second, func() bool {
+			return strings.Contains(output.String(), "Run 'help' to see a list of commands and check for updates.")
+		}) {
+			t.Fatal("Timed out waiting for REPL to start")
+		}
+		output.Reset()
+
+		if err := rt.repl.OneShot(ctx, "data.test.p"); err != nil {
+			t.Fatalf("Unexpected error: %v", err)
+		}
+
+		actual := strings.TrimSpace(output.String())
+		expected := "7"
+
+		if actual != expected {
+			t.Fatalf("expected data.test.p to be %v, got %v", expected, actual)
+		}
+	})
+}
+
+func TestRuntimeReplProcessWatchV1Compatible(t *testing.T) {
+	tests := []struct {
+		note         string
+		v1Compatible bool
+		policy       string
+		expErrs      []string
+		expOutput    string
+	}{
+		{
+			note: "v0.x, keywords not used",
+			policy: `package test
+p[1] {
+	data.foo == "bar"
+}`,
+		},
+		{
+			note: "v0.x, keywords not imported",
+			policy: `package test
+p contains 1 if {
+	data.foo == "bar"
+}`,
+			expErrs: []string{
+				"rego_parse_error: var cannot be used for rule name",
+				"rego_parse_error: number cannot be used for rule name",
+			},
+		},
+		{
+			note: "v0.x, keywords imported",
+			policy: `package test
+import future.keywords
+p contains 1 if {
+	data.foo == "bar"
+}`,
+		},
+		{
+			note: "v0.x, rego.v1 imported",
+			policy: `package test
+import rego.v1
+p contains 1 if {
+	data.foo == "bar"
+}`,
+		},
+
+		{
+			note:         "v1.0, keywords not used",
+			v1Compatible: true,
+			policy: `package test
+p[1] {
+	data.foo == "bar"
+}`,
+			expErrs: []string{
+				"rego_parse_error: `if` keyword is required before rule body",
+				"rego_parse_error: `contains` keyword is required for partial set rules",
+			},
+		},
+		{
+			note:         "v1.0, keywords not imported",
+			v1Compatible: true,
+			policy: `package test
+p contains 1 if {
+	data.foo == "bar"
+}`,
+		},
+		{
+			note:         "v1.0, keywords imported",
+			v1Compatible: true,
+			policy: `package test
+import future.keywords
+p contains 1 if {
+	data.foo == "bar"
+}`,
+		},
+		{
+			note:         "v1.0, rego.v1 imported",
+			v1Compatible: true,
+			policy: `package test
+import rego.v1
+p contains 1 if {
+	data.foo == "bar"
+}`,
+		},
+	}
+
+	fs := map[string]string{
+		"test/data.json": `{"foo": "bar"}`,
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.note, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
+			test.WithTempFS(fs, func(rootDir string) {
+				// Prefix the directory intended to be watched with at least one
+				// directory to avoid permission issues on the local host. Otherwise, we
+				// cannot always watch the tmp directory's parent.
+				rootDir = filepath.Join(rootDir, "test")
+
+				output := test.BlockingWriter{}
+
+				params := NewParams()
+				params.Output = &output
+				params.Paths = []string{rootDir}
+				params.Watch = true
+				params.V1Compatible = tc.v1Compatible
+
+				rt, err := NewRuntime(ctx, params)
+				if err != nil {
+					t.Fatal(err)
+				}
+
+				go rt.StartREPL(ctx)
+
+				if !test.Eventually(t, 5*time.Second, func() bool {
+					return strings.Contains(output.String(), "Run 'help' to see a list of commands and check for updates.")
+				}) {
+					t.Fatal("Timed out waiting for REPL to start")
+				}
+				output.Reset()
+
+				// write new policy to disk, to trigger the watcher
+				if err := os.WriteFile(path.Join(rootDir, "authz.rego"), []byte(tc.policy), 0644); err != nil {
+					t.Fatal(err)
+				}
+
+				if tc.expErrs != nil {
+					if !test.Eventually(t, 5*time.Second, func() bool {
+						for _, expErr := range tc.expErrs {
+							if !strings.Contains(output.String(), expErr) {
+								return false
+							}
+						}
+						return true
+					}) {
+						t.Fatalf("Expected error(s):\n\n%v\n\ngot output:\n\n%s", tc.expErrs, output.String())
+					}
+				} else {
+					if !test.Eventually(t, 5*time.Second, func() bool {
+						return strings.Contains(output.String(), "# reloaded files")
+					}) {
+						t.Fatal("Timed out waiting for watcher")
+					}
+				}
+			})
+		})
+	}
+}
+
+func TestRuntimeServerProcessWatchV1Compatible(t *testing.T) {
+	tests := []struct {
+		note         string
+		v1Compatible bool
+		policy       string
+		expErrs      []string
+		expOutput    string
+	}{
+		{
+			note: "v0.x, keywords not used",
+			policy: `package test
+p[1] {
+	data.foo == "bar"
+}`,
+		},
+		{
+			note: "v0.x, keywords not imported",
+			policy: `package test
+p contains 1 if {
+	data.foo == "bar"
+}`,
+			expErrs: []string{
+				"rego_parse_error: var cannot be used for rule name",
+				"rego_parse_error: number cannot be used for rule name",
+			},
+		},
+		{
+			note: "v0.x, keywords imported",
+			policy: `package test
+import future.keywords
+p contains 1 if {
+	data.foo == "bar"
+}`,
+		},
+		{
+			note: "v0.x, rego.v1 imported",
+			policy: `package test
+import rego.v1
+p contains 1 if {
+	data.foo == "bar"
+}`,
+		},
+		{
+			note:         "v1.0, keywords not used",
+			v1Compatible: true,
+			policy: `package test
+p[1] {
+	data.foo == "bar"
+}`,
+			expErrs: []string{
+				"rego_parse_error: `if` keyword is required before rule body",
+				"rego_parse_error: `contains` keyword is required for partial set rules",
+			},
+		},
+		{
+			note:         "v1.0, keywords not imported",
+			v1Compatible: true,
+			policy: `package test
+p contains 1 if {
+	data.foo == "bar"
+}`,
+		},
+		{
+			note:         "v1.0, keywords imported",
+			v1Compatible: true,
+			policy: `package test
+import future.keywords
+p contains 1 if {
+	data.foo == "bar"
+}`,
+		},
+		{
+			note:         "v1.0, rego.v1 imported",
+			v1Compatible: true,
+			policy: `package test
+import rego.v1
+p contains 1 if {
+	data.foo == "bar"
+}`,
+		},
+	}
+
+	fs := map[string]string{
+		"test/data.json": `{"foo": "bar"}`,
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.note, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
+			test.WithTempFS(fs, func(rootDir string) {
+				// Prefix the directory intended to be watched with at least one
+				// directory to avoid permission issues on the local host. Otherwise, we
+				// cannot always watch the tmp directory's parent.
+				rootDir = filepath.Join(rootDir, "test")
+
+				testLogger := testLog.New()
+
+				params := NewParams()
+				params.Logger = testLogger
+				params.Addrs = &[]string{"localhost:0"}
+				params.AddrSetByUser = true
+				params.Paths = []string{rootDir}
+				params.Watch = true
+				params.V1Compatible = tc.v1Compatible
+
+				rt, err := NewRuntime(ctx, params)
+				if err != nil {
+					t.Fatal(err)
+				}
+
+				go rt.StartServer(ctx)
+
+				if !test.Eventually(t, 5*time.Second, func() bool {
+					found := false
+					for _, e := range testLogger.Entries() {
+						found = strings.Contains(e.Message, "Server initialized.") || found
+					}
+					return found
+				}) {
+					t.Fatal("Timed out waiting for server to start")
+				}
+
+				// write new policy to disk, to trigger the watcher
+				if err := os.WriteFile(path.Join(rootDir, "authz.rego"), []byte(tc.policy), 0644); err != nil {
+					t.Fatal(err)
+				}
+
+				if tc.expErrs != nil {
+					// wait for errors
+					if !test.Eventually(t, 5*time.Second, func() bool {
+						for _, expErr := range tc.expErrs {
+							found := false
+							for _, e := range testLogger.Entries() {
+								if errs, ok := e.Fields["err"].(loader.Errors); ok {
+									for _, err := range errs {
+										found = strings.Contains(err.Error(), expErr) || found
+									}
+								}
+							}
+							if !found {
+								return false
+							}
+						}
+						return true
+					}) {
+						t.Fatalf("Timed out waiting for watcher. Expected errors:\n\n%v\n\ngot output:\n\n%v",
+							tc.expErrs, testLogger.Entries())
+					}
+				} else {
+					// wait for successful reload
+					if !test.Eventually(t, 5*time.Second, func() bool {
+						found := false
+						for _, e := range testLogger.Entries() {
+							found = strings.Contains(e.Message, "Processed file watch event.") || found
+						}
+						return found
+					}) {
+						t.Fatal("Timed out waiting for watcher")
+					}
+				}
+			})
+		})
+	}
 }
 
 func TestCheckOPAUpdateBadURL(t *testing.T) {
@@ -443,6 +821,519 @@ func TestServerInitialized(t *testing.T) {
 		t.Fatal("expected ServerInitializedChannel to be closed")
 	}
 }
+
+func TestServerInitializedWithRegoV1(t *testing.T) {
+	tests := []struct {
+		note         string
+		v1Compatible bool
+		files        map[string]string
+		expErr       string
+	}{
+		{
+			note: "Rego v0, keywords not imported",
+			files: map[string]string{
+				"policy.rego": `package test
+				p if {
+					input.x == 1
+				}
+				`,
+			},
+			expErr: "rego_parse_error: var cannot be used for rule name",
+		},
+		{
+			note: "Rego v0, rego.v1 imported",
+			files: map[string]string{
+				"policy.rego": `package test
+				import rego.v1
+				p if {
+					input.x == 1
+				}
+				`,
+			},
+		},
+		{
+			note: "Rego v0, future.keywords imported",
+			files: map[string]string{
+				"policy.rego": `package test
+				import future.keywords.if
+				p if {
+					input.x == 1
+				}
+				`,
+			},
+		},
+		{
+			note: "Rego v0, no keywords used",
+			files: map[string]string{
+				"policy.rego": `package test
+				p {
+					input.x == 1
+				}
+				`,
+			},
+		},
+		{
+			note:         "Rego v1, keywords not imported",
+			v1Compatible: true,
+			files: map[string]string{
+				"policy.rego": `package test
+				p if {
+					input.x == 1
+				}
+				`,
+			},
+		},
+		{
+			note:         "Rego v1, rego.v1 imported",
+			v1Compatible: true,
+			files: map[string]string{
+				"policy.rego": `package test
+				import rego.v1
+				p if {
+					input.x == 1
+				}
+				`,
+			},
+		},
+		{
+			note:         "Rego v1, future.keywords imported",
+			v1Compatible: true,
+			files: map[string]string{
+				"policy.rego": `package test
+				import future.keywords.if
+				p if {
+					input.x == 1
+				}
+				`,
+			},
+		},
+		{
+			note:         "Rego v1, no keywords used",
+			v1Compatible: true,
+			files: map[string]string{
+				"policy.rego": `package test
+				p {
+					input.x == 1
+				}
+				`,
+			},
+			expErr: "rego_parse_error: `if` keyword is required before rule body",
+		},
+	}
+
+	bundle := []bool{false, true}
+
+	for _, tc := range tests {
+		for _, b := range bundle {
+			t.Run(fmt.Sprintf("%s; bundle=%v", tc.note, b), func(t *testing.T) {
+				test.WithTempFS(tc.files, func(root string) {
+					ctx, cancel := context.WithTimeout(context.Background(), 2*time.Millisecond)
+					defer cancel()
+					var output bytes.Buffer
+
+					params := NewParams()
+					params.Output = &output
+					params.Paths = []string{root}
+					params.BundleMode = b
+					params.Addrs = &[]string{"localhost:0"}
+					params.GracefulShutdownPeriod = 1
+					params.Logger = logging.NewNoOpLogger()
+					params.V1Compatible = tc.v1Compatible
+
+					rt, err := NewRuntime(ctx, params)
+
+					if tc.expErr != "" {
+						if err == nil {
+							t.Fatal("Expected error but got nil")
+						}
+						if !strings.Contains(err.Error(), tc.expErr) {
+							t.Fatalf("Expected error:\n\n%v\n\ngot:\n\n%v", tc.expErr, err.Error())
+						}
+					} else {
+						if err != nil {
+							t.Fatalf("Unexpected error %v", err)
+						}
+
+						initChannel := rt.Manager.ServerInitializedChannel()
+						done := make(chan struct{})
+						go func() {
+							rt.StartServer(ctx)
+							close(done)
+						}()
+						<-done
+						select {
+						case <-initChannel:
+							return
+						default:
+							t.Fatal("expected ServerInitializedChannel to be closed")
+						}
+					}
+				})
+			})
+		}
+	}
+}
+
+func TestServerInitializedWithBundleRegoVersion(t *testing.T) {
+	tests := []struct {
+		note   string
+		files  map[string]string
+		expErr string
+	}{
+		{
+			note: "v0.x bundle, keywords not imported",
+			files: map[string]string{
+				".manifest": `{"rego_version": 0}`,
+				"policy.rego": `package test
+				p if {
+					input.x == 1
+				}
+				`,
+			},
+			expErr: "rego_parse_error: var cannot be used for rule name",
+		},
+		{
+			note: "v0.x bundle, rego.v1 imported",
+			files: map[string]string{
+				".manifest": `{"rego_version": 0}`,
+				"policy.rego": `package test
+				import rego.v1
+				p if {
+					input.x == 1
+				}
+				`,
+			},
+		},
+		{
+			note: "v0.x bundle, future.keywords imported",
+			files: map[string]string{
+				".manifest": `{"rego_version": 0}`,
+				"policy.rego": `package test
+				import future.keywords.if
+				p if {
+					input.x == 1
+				}
+				`,
+			},
+		},
+		{
+			note: "v0.x bundle, no keywords used",
+			files: map[string]string{
+				".manifest": `{"rego_version": 0}`,
+				"policy.rego": `package test
+				p {
+					input.x == 1
+				}
+				`,
+			},
+		},
+		{
+			note: "v0 bundle, v1 per-file override",
+			files: map[string]string{
+				".manifest": `{
+					"rego_version": 0,
+					"file_rego_versions": {
+						"/policy2.rego": 1
+					}
+				}`,
+				"policy1.rego": `package test
+				p[1] {
+					input.x == 1
+				}
+				`,
+				"policy2.rego": `package test
+				q contains 2 if {
+					input.x == 1
+				}
+				`,
+			},
+		},
+		{
+			note: "v0 bundle, v1 per-file override (glob)",
+			files: map[string]string{
+				".manifest": `{
+					"rego_version": 0,
+					"file_rego_versions": {
+						"/bar/*.rego": 1
+					}
+				}`,
+				"foo/policy1.rego": `package test
+				p[1] {
+					input.x == 1
+				}
+				`,
+				"bar/policy2.rego": `package test
+				q contains 2 if {
+					input.x == 1
+				}
+				`,
+			},
+		},
+		{
+			note: "v0 bundle, v1 per-file override, incompatible",
+			files: map[string]string{
+				".manifest": `{
+					"rego_version": 0,
+					"file_rego_versions": {
+						"/policy2.rego": 1
+					}
+				}`,
+				"policy1.rego": `package test
+				p[1] {
+					input.x == 1
+				}
+				`,
+				"policy2.rego": `package test
+				q[2] {
+					input.x == 1
+				}
+				`,
+			},
+			expErr: "rego_parse_error",
+		},
+
+		{
+			note: "v1.0 bundle, keywords not imported",
+			files: map[string]string{
+				".manifest": `{"rego_version": 1}`,
+				"policy.rego": `package test
+				p if {
+					input.x == 1
+				}
+				`,
+			},
+		},
+		{
+			note: "v1.0 bundle, rego.v1 imported",
+			files: map[string]string{
+				".manifest": `{"rego_version": 1}`,
+				"policy.rego": `package test
+				import rego.v1
+				p if {
+					input.x == 1
+				}
+				`,
+			},
+		},
+		{
+			note: "v1.0 bundle, future.keywords imported",
+			files: map[string]string{
+				".manifest": `{"rego_version": 1}`,
+				"policy.rego": `package test
+				import future.keywords.if
+				p if {
+					input.x == 1
+				}
+				`,
+			},
+		},
+		{
+			note: "v1.0 bundle, no keywords used",
+			files: map[string]string{
+				".manifest": `{"rego_version": 1}`,
+				"policy.rego": `package test
+				p {
+					input.x == 1
+				}
+				`,
+			},
+			expErr: "rego_parse_error: `if` keyword is required before rule body",
+		},
+		{
+			note: "v1 bundle, v0 per-file override",
+			files: map[string]string{
+				".manifest": `{
+					"rego_version": 1,
+					"file_rego_versions": {
+						"/policy1.rego": 0
+					}
+				}`,
+				"policy1.rego": `package test
+				p[1] {
+					input.x == 1
+				}
+				`,
+				"policy2.rego": `package test
+				q contains 2 if {
+					input.x == 1
+				}
+				`,
+			},
+		},
+		{
+			note: "v1 bundle, v0 per-file override (glob)",
+			files: map[string]string{
+				".manifest": `{
+					"rego_version": 1,
+					"file_rego_versions": {
+						"/foo/*.rego": 0
+					}
+				}`,
+				"foo/policy1.rego": `package test
+				p[1] {
+					input.x == 1
+				}
+				`,
+				"bar/policy2.rego": `package test
+				q contains 2 if {
+					input.x == 1
+				}
+				`,
+			},
+		},
+		{
+			note: "v1 bundle, v0 per-file override, incompatible",
+			files: map[string]string{
+				".manifest": `{
+					"rego_version": 1,
+					"file_rego_versions": {
+						"/policy1.rego": 0
+					}
+				}`,
+				"policy1.rego": `package test
+				p contains 1 if {
+					input.x == 1
+				}
+				`,
+				"policy2.rego": `package test
+				q contains 2 if {
+					input.x == 1
+				}
+				`,
+			},
+			expErr: "rego_parse_error",
+		},
+	}
+
+	bundleTypeCases := []struct {
+		note string
+		tar  bool
+	}{
+		{
+			"bundle dir", false,
+		},
+		{
+			"bundle tar", true,
+		},
+	}
+
+	for _, bundleType := range bundleTypeCases {
+		for _, tc := range tests {
+			t.Run(fmt.Sprintf("%s, %s", bundleType.note, tc.note), func(t *testing.T) {
+				files := map[string]string{}
+				if bundleType.tar {
+					files["bundle.tar.gz"] = ""
+				} else {
+					for k, v := range tc.files {
+						files[k] = v
+					}
+				}
+
+				test.WithTempFS(files, func(root string) {
+					p := root
+					if bundleType.tar {
+						p = filepath.Join(root, "bundle.tar.gz")
+						files := make([][2]string, 0, len(tc.files))
+						for k, v := range tc.files {
+							files = append(files, [2]string{k, v})
+						}
+						buf := archive.MustWriteTarGz(files)
+						bf, err := os.Create(p)
+						if err != nil {
+							t.Fatalf("Unexpected error: %v", err)
+						}
+						_, err = bf.Write(buf.Bytes())
+						if err != nil {
+							t.Fatalf("Unexpected error: %v", err)
+						}
+					}
+
+					ctx, cancel := context.WithTimeout(context.Background(), 2*time.Millisecond)
+					defer cancel()
+					var output bytes.Buffer
+
+					params := NewParams()
+					params.Output = &output
+					params.Paths = []string{p}
+					params.BundleMode = true
+					params.Addrs = &[]string{"localhost:0"}
+					params.GracefulShutdownPeriod = 1
+					params.Logger = logging.NewNoOpLogger()
+
+					rt, err := NewRuntime(ctx, params)
+
+					if tc.expErr != "" {
+						if err == nil {
+							t.Fatal("Expected error but got nil")
+						}
+						if !strings.Contains(err.Error(), tc.expErr) {
+							t.Fatalf("Expected error:\n\n%v\n\ngot:\n\n%v", tc.expErr, err.Error())
+						}
+					} else {
+						if err != nil {
+							t.Fatalf("Unexpected error %v", err)
+						}
+
+						initChannel := rt.Manager.ServerInitializedChannel()
+						done := make(chan struct{})
+						go func() {
+							rt.StartServer(ctx)
+							close(done)
+						}()
+						<-done
+						select {
+						case <-initChannel:
+							return
+						default:
+							t.Fatal("expected ServerInitializedChannel to be closed")
+						}
+					}
+				})
+			})
+		}
+	}
+}
+
+func TestGracefulTracerShutdown(t *testing.T) {
+	fs := map[string]string{
+		"/config.yaml": `{"distributed_tracing": {"type": "grpc"}}`,
+	}
+
+	test.WithTempFS(fs, func(testDirRoot string) {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Millisecond)
+		defer cancel() // NOTE(sr): The timeout will have been reached by the time `done` is closed.
+
+		logger := testLog.New()
+
+		params := NewParams()
+		params.ConfigFile = filepath.Join(testDirRoot, "/config.yaml")
+		params.Addrs = &[]string{"localhost:0"}
+		params.GracefulShutdownPeriod = 1
+		params.Logger = logger
+
+		rt, err := NewRuntime(ctx, params)
+		if err != nil {
+			t.Fatalf("Unexpected error %v", err)
+		}
+
+		if rt.traceExporter == nil {
+			t.Fatal("traceExporter should not be nil")
+		}
+
+		done := make(chan struct{})
+		go func() {
+			rt.StartServer(ctx)
+			close(done)
+		}()
+		<-done
+
+		expected := "Failed to shutdown OpenTelemetry trace exporter gracefully."
+		if strings.Contains(logger.Entries()[0].Message, expected) {
+			t.Fatalf("Expected no output containing: \"%v\"", expected)
+		}
+	})
+}
+
 func TestUrlPathToConfigOverride(t *testing.T) {
 	params := NewParams()
 	params.Paths = []string{"https://www.example.com/bundles/bundle.tar.gz"}
@@ -493,7 +1384,7 @@ func getTestServer(update interface{}, statusCode int) (baseURL string, teardown
 	mux := http.NewServeMux()
 	ts := httptest.NewServer(mux)
 
-	mux.HandleFunc("/v1/version", func(w http.ResponseWriter, req *http.Request) {
+	mux.HandleFunc("/v1/version", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(statusCode)
 		bs, _ := json.Marshal(update)
 		w.Header().Set("Content-Type", "application/json")
@@ -559,9 +1450,12 @@ func TestAddrWarningMessage(t *testing.T) {
 		name          string
 		addrSetByUser bool
 		containsMsg   bool
+		v1Compatible  bool
 	}{
-		{"WarningMessage", false, true},
-		{"NoWarningMessage", true, false},
+		{"WarningMessage", false, true, false},
+		{"NoWarningMessage", true, false, false},
+		{"V1Compatible", false, false, true},
+		{"V1InCompatible", false, true, false},
 	}
 
 	for _, tc := range testCases {
@@ -578,6 +1472,7 @@ func TestAddrWarningMessage(t *testing.T) {
 			params.Addrs = &[]string{"localhost:8181"}
 			params.AddrSetByUser = tc.addrSetByUser
 			params.GracefulShutdownPeriod = 1
+			params.V1Compatible = tc.v1Compatible
 			rt, err := NewRuntime(ctx, params)
 			if err != nil {
 				t.Fatalf("Unexpected error %v", err)

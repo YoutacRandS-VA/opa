@@ -349,12 +349,9 @@ func TestPluginStartTriggerManual(t *testing.T) {
 			"app":     "example-app",
 			"version": version.Version,
 		},
-		Plugins: map[string]*plugins.Status{
-			"status": {State: plugins.StateOK},
-		},
 	}
 
-	if !reflect.DeepEqual(result, exp) {
+	if !reflect.DeepEqual(result.Labels, exp.Labels) {
 		t.Fatalf("Expected: %v but got: %v", exp, result)
 	}
 
@@ -371,7 +368,7 @@ func TestPluginStartTriggerManual(t *testing.T) {
 
 	exp.Bundles = map[string]*bundle.Status{"test": status}
 
-	if !reflect.DeepEqual(result, exp) {
+	if !reflect.DeepEqual(result.Bundles, exp.Bundles) {
 		t.Fatalf("Expected: %v but got: %v", exp, result)
 	}
 }
@@ -426,7 +423,7 @@ func TestPluginStartTriggerManualWithTimeout(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
 	defer cancel()
 
-	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	s := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
 		time.Sleep(3 * time.Second) // this should cause the context deadline to exceed
 	}))
 

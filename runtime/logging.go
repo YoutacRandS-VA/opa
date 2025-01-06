@@ -24,8 +24,13 @@ type loggingPrintHook struct {
 func (h loggingPrintHook) Print(pctx print.Context, msg string) error {
 	// NOTE(tsandall): if the request context is not present then do not panic,
 	// just log the print message without the additional context.
-	rctx, _ := logging.FromContext(pctx.Context)
-	fields := rctx.Fields()
+	var fields map[string]any
+	rctx, ok := logging.FromContext(pctx.Context)
+	if ok {
+		fields = rctx.Fields()
+	} else {
+		fields = make(map[string]any, 1)
+	}
 	fields["line"] = pctx.Location.String()
 	h.logger.WithFields(fields).Info(msg)
 	return nil
@@ -53,8 +58,15 @@ func (h *LoggingHandler) loggingEnabled(level logging.Level) bool {
 }
 
 func (h *LoggingHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+
+	cloneHeaders := r.Header.Clone()
+
+	// set the HTTP headers via a dedicated key on the parent context irrespective of logging level
+	r = r.WithContext(logging.WithHTTPRequestContext(r.Context(), &logging.HTTPRequestContext{Header: cloneHeaders}))
+
 	var rctx logging.RequestContext
 	rctx.ReqID = atomic.AddUint64(&h.requestID, uint64(1))
+
 	recorder := newRecorder(h.logger, w, r, rctx.ReqID, h.loggingEnabled(logging.Debug))
 	t0 := time.Now()
 

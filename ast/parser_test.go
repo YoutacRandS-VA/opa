@@ -30,7 +30,7 @@ import data.networks
 import data.ports
 
 # A server exists in the violations set if...
-violations[server] {
+violations contains server if {
     # ...the server exists
     server = servers[i]
     # ...and any of the server’s protocols is HTTP
@@ -40,7 +40,7 @@ violations[server] {
 }
 
 # A server exists in the public_servers set if...
-public_servers[server] {
+public_servers contains server if {
 	# Semicolons are optional. Can group expressions onto one line.
     server = servers[i]; server.ports[j] = ports[k].id 	# ...and the server is connected to a port
     ports[k].networks[l] = networks[m].id; 				# ...and the port is connected to a network
@@ -735,6 +735,7 @@ func TestSomeDeclExpr(t *testing.T) {
 		),
 	})
 
+	// Only relevant for v0, as the 'in' keyword isn't a permitted var name in v1.
 	assertParseRule(t, "whitespace separated, following `in` rule ref", `
 	p[x] {
 		some x
@@ -746,19 +747,23 @@ func TestSomeDeclExpr(t *testing.T) {
 			NewExpr(&SomeDecl{Symbols: []*Term{VarTerm("x")}}),
 			NewExpr(RefTerm(VarTerm("in"), VarTerm("x"))),
 		),
-	})
+	}, ParserOptions{RegoVersion: RegoV0})
 
+	// Only relevant for v0, as the 'in' keyword is included in v1.
 	assertParseErrorContains(t, "some x in ... usage is hinted properly", `
-	p[x] {
+	p contains x if {
 		some x in {"foo": "bar"}
 	}`,
-		"unexpected ident token: expected \\n or ; or } (hint: `import future.keywords.in` for `some x in xs` expressions)")
+		"unexpected identifier token: expected \\n or ; or } (hint: `import future.keywords.in` for `some x in xs` expressions)",
+		ParserOptions{RegoVersion: RegoV0})
 
+	// Only relevant for v0, as the 'in' keyword is included in v1.
 	assertParseErrorContains(t, "some x, y in ... usage is hinted properly", `
-	p[y] = x {
+	p[y] = x if {
 		some x, y in {"foo": "bar"}
 	}`,
-		"unexpected ident token: expected \\n or ; or } (hint: `import future.keywords.in` for `some x in xs` expressions)")
+		"unexpected identifier token: expected \\n or ; or } (hint: `import future.keywords.in` for `some x in xs` expressions)",
+		ParserOptions{RegoVersion: RegoV0})
 
 	assertParseRule(t, "whitespace terminated", `
 
@@ -844,18 +849,21 @@ func TestEvery(t *testing.T) {
 			With: []*With{{Value: ArrayTerm(), Target: NewTerm(MustParseRef("input"))}},
 		}, opts)
 
+	// Only relevant for v0, as the 'every' keyword is included in v1.
 	assertParseErrorContains(t, "every x, y in ... usage is hinted properly", `
 	p {
 		every x, y in {"foo": "bar"} { is_string(x); is_string(y) }
 	}`,
-		"unexpected ident token: expected \\n or ; or } (hint: `import future.keywords.every` for `every x in xs { ... }` expressions)")
+		"unexpected identifier token: expected \\n or ; or } (hint: `import future.keywords.every` for `every x in xs { ... }` expressions)",
+		ParserOptions{RegoVersion: RegoV0})
 
+	// Only relevant for v0, as the 'in' keyword is included in v1.
 	assertParseErrorContains(t, "not every 'every' gets a hint", `
 	p {
 		every x
 	}`,
-		"unexpected ident token: expected \\n or ; or }\n\tevery x\n", // this asserts that the tail of the error message doesn't contain a hint
-	)
+		"unexpected identifier token: expected \\n or ; or }\n\tevery x\n", // this asserts that the tail of the error message doesn't contain a hint
+		ParserOptions{RegoVersion: RegoV0})
 
 	assertParseErrorContains(t, "invalid domain (internal.member_2)", "every internal.member_2()", "illegal domain", opts)
 	assertParseErrorContains(t, "invalid domain (internal.member_3)", "every internal.member_3()", "illegal domain", opts)
@@ -1213,7 +1221,7 @@ func TestImport(t *testing.T) {
 	assertParseImport(t, "white space", "import input.foo.bar[\"white space\"]", &Import{Path: whitespace})
 	assertParseErrorContains(t, "non-ground ref", "import data.foo[x]", "rego_parse_error: unexpected var token: expecting string")
 	assertParseErrorContains(t, "non-string", "import input.foo[0]", "rego_parse_error: unexpected number token: expecting string")
-	assertParseErrorContains(t, "unknown root", "import foo.bar", "rego_parse_error: unexpected import path, must begin with one of: {data, future, input}, got: foo")
+	assertParseErrorContains(t, "unknown root", "import foo.bar", "rego_parse_error: unexpected import path, must begin with one of: {data, future, input, rego}, got: foo")
 	assertParseErrorContains(t, "bad variable term", "import input as A(", "rego_parse_error: unexpected eof token: expected var")
 
 	_, _, err := ParseStatements("", "package foo\nimport bar.data\ndefault foo=1")
@@ -1258,10 +1266,30 @@ func TestFutureImports(t *testing.T) {
 	}
 	assertParseModule(t, "multiple imports, all kw in options", mod, &parsed, ParserOptions{AllFutureKeywords: true})
 	assertParseModule(t, "multiple imports, single in options", mod, &parsed, ParserOptions{FutureKeywords: []string{"in"}})
+
+	mod = `
+		package p
+		import rego.v1
+		import future.keywords.in
+	`
+	// Only applies to v0, as the 'rego.v1' import is a no-op in v1
+	assertParseModuleErrorMatch(t, "rego.v1 and future.keywords.in imported", mod,
+		"rego_parse_error: the `rego.v1` import implies `future.keywords`, these are therefore mutually exclusive",
+		ParserOptions{RegoVersion: RegoV0})
+
+	mod = `
+		package p
+        import future.keywords
+		import rego.v1
+	`
+	// Only applies to v0, as the 'rego.v1' import is a no-op in v1
+	assertParseModuleErrorMatch(t, "rego.v1 and future.keywords imported", mod,
+		"rego_parse_error: the `rego.v1` import implies `future.keywords`, these are therefore mutually exclusive",
+		ParserOptions{RegoVersion: RegoV0})
 }
 
-func TestFutureImportsExtraction(t *testing.T) {
-	// These tests assert that "import future..." statements in policies cause
+func TestFutureAndRegoV1ImportsExtraction(t *testing.T) {
+	// These tests assert that "import future..." and "import rego.v1" statements in policies cause
 	// the proper keywords to be added to the parser's list of known keywords.
 	tests := []struct {
 		note, imp string
@@ -1275,14 +1303,34 @@ func TestFutureImportsExtraction(t *testing.T) {
 		{
 			note: "all keywords imported",
 			imp:  "import future.keywords",
-			exp:  map[string]tokens.Token{"in": tokens.In},
+			exp: map[string]tokens.Token{
+				"in":       tokens.In,
+				"every":    tokens.Every,
+				"contains": tokens.Contains,
+				"if":       tokens.If,
+			},
 		},
 		{
 			note: "all keywords + single keyword imported",
 			imp: `
 				import future.keywords
 				import future.keywords.in`,
-			exp: map[string]tokens.Token{"in": tokens.In},
+			exp: map[string]tokens.Token{
+				"in":       tokens.In,
+				"every":    tokens.Every,
+				"contains": tokens.Contains,
+				"if":       tokens.If,
+			},
+		},
+		{
+			note: "rego.v1 imported",
+			imp:  "import rego.v1",
+			exp: map[string]tokens.Token{
+				"in":       tokens.In,
+				"every":    tokens.Every,
+				"contains": tokens.Contains,
+				"if":       tokens.If,
+			},
 		},
 	}
 	for _, tc := range tests {
@@ -1296,6 +1344,597 @@ func TestFutureImportsExtraction(t *testing.T) {
 				act := parser.s.s.Keyword(kw)
 				if act != exp {
 					t.Errorf("expected keyword %q to yield token %v, got %v", kw, exp, act)
+				}
+			}
+		})
+	}
+}
+
+func TestHintsOnUnknownImport(t *testing.T) {
+	assertParseErrorContains(t, "unknown", "import unknown",
+		"unexpected import path, must begin with one of: {data, future, input, rego}, got: unknown (hint: if this is unexpected, try updating OPA)")
+}
+
+func TestRegoV1Import(t *testing.T) {
+	// These tests assert that the 'rego.v1' import is correctly handled in v0.
+	popts := ParserOptions{RegoVersion: RegoV0}
+
+	assertParseErrorContains(t, "rego", "import rego", "invalid import `rego`, must be `rego.v1`", popts)
+	assertParseErrorContains(t, "rego.foo", "import rego.foo", "invalid import `rego.foo`, must be `rego.v1`", popts)
+	assertParseErrorContains(t, "rego.foo.bar", "import rego.foo.bar", "invalid import `rego.foo.bar`, must be `rego.v1`", popts)
+	assertParseErrorContains(t, "rego.v1.bar", "import rego.v1.bar", "invalid import `rego.v1.bar`, must be `rego.v1`", popts)
+	assertParseErrorContains(t, "rego.v1 + alias", "import rego.v1 as xyz", "`rego` imports cannot be aliased", popts)
+
+	assertParseImport(t, "import rego.v1",
+		"import rego.v1", &Import{Path: RefTerm(VarTerm("rego"), StringTerm("v1"))},
+		ParserOptions{})
+
+	tests := []struct {
+		note           string
+		module         string
+		expectedErrors []string
+	}{
+		{
+			note: "only rego.v1 imported",
+			module: `package test
+import rego.v1
+p contains 1 if 1 == 1`,
+		},
+		{
+			note: "rego.v1 and future.keywords imported",
+			module: `package test
+import rego.v1
+import future.keywords
+p contains 1 if {
+	input.x == 1
+}`,
+			expectedErrors: []string{"rego_parse_error: the `rego.v1` import implies `future.keywords`, these are therefore mutually exclusive"},
+		},
+		{
+			note: "`if` keyword used on rule",
+			module: `package test
+import rego.v1
+p if {
+	input.x == 1
+}`,
+		},
+		{
+			note: "`if` keyword not used on rule",
+			module: `package test
+import rego.v1
+p {
+	input.x == 1
+}`,
+			expectedErrors: []string{"rego_parse_error: `if` keyword is required before rule body"},
+		},
+		{
+			note: "constant definition",
+			module: `package test
+import rego.v1
+p := 1`,
+		},
+		{
+			note: "`if` keyword used before else body",
+			module: `package test
+import rego.v1
+p if {
+	input.x == 1
+} else if {
+	input.x == 2
+}`,
+		},
+		{
+			note: "`if` keyword used before else body (value assignment)",
+			module: `package test
+import rego.v1
+p := "foo" if {
+	input.x == 1
+} else := "bar" if {
+	input.x == 2
+} else := "baz" if input.x == 3
+else := "qux"`,
+		},
+		{
+			note: "no else body (value assignment, but not on primary head) (regression test for #6364)",
+			module: `package test
+import rego.v1
+p if {
+	input.x == 1
+} else := "baz" if input.x == 3
+else := "qux"`,
+		},
+		{
+			note: "`if` keyword used before else body (value assignment, but not on primary head) (regression test for #6364)",
+			module: `package test
+import rego.v1
+p if {
+	input.x == 1
+} else := "bar" if {
+	input.x == 2
+} else := "baz" if input.x == 3
+else := "qux"`,
+		},
+		{
+			note: "`if` keyword not used before else body",
+			module: `package test
+import rego.v1
+p if {
+	input.x == 1
+} else {
+	input.x == 2
+}`,
+			expectedErrors: []string{"rego_parse_error: `if` keyword is required before rule body"},
+		},
+		{
+			note: "`if` keyword not used before else body (value assignment)",
+			module: `package test
+import rego.v1
+p := "foo" if {
+	input.x == 1
+} else := "bar" {
+	input.x == 2
+}`,
+			expectedErrors: []string{"rego_parse_error: `if` keyword is required before rule body"},
+		},
+		{
+			note: "`contains` keyword used on partial set rule (const key)",
+			module: `package test
+import rego.v1
+p contains "q"`,
+		},
+		{
+			note: "`contains` keyword used on partial set rule (ref-head, const key)",
+			module: `package test
+import rego.v1
+p.q contains "r"`,
+		},
+		{
+			note: "`contains` keyword not used on partial set rule (const key)",
+			module: `package test
+import rego.v1
+p.q`,
+			expectedErrors: []string{"rego_parse_error: `contains` keyword is required for partial set rules"},
+		},
+		{
+			note: "object definition (naked ref-head with implicit `true` value)",
+			module: `package test
+import rego.v1
+p.q.r`,
+			expectedErrors: []string{"rego_parse_error: rule must have value assignment and/or body declaration"},
+		},
+		{
+			note: "`contains` keyword used on partial set rule (var key, no body)",
+			module: `package test
+import rego.v1
+p contains input.x`,
+		},
+		{
+			note: "`contains` keyword not used on partial set rule (var key, no body)",
+			module: `package test
+import rego.v1
+p[input.x]`,
+			expectedErrors: []string{"rego_parse_error: `contains` keyword is required for partial set rules"},
+		},
+		{
+			note: "`if` keyword not used on partial object rule (ref-head, var key, implicit `true` value, no body)",
+			module: `package test
+import rego.v1
+p.q[input.x]`,
+			expectedErrors: []string{"rego_parse_error: rule must have value assignment and/or body declaration"},
+		},
+		{
+			note: "`contains` keyword used on partial set rule (var key)",
+			module: `package test
+import rego.v1
+p contains x if { x = input.x}`,
+		},
+		{
+			note: "`if` keyword used on partial map rule (would be multi-value without `if`)",
+			module: `package test
+import rego.v1
+p[x] if { x = input.x}`,
+		},
+		{
+			note: "`contains` and `if` keyword not used on partial rule",
+			module: `package test
+import rego.v1
+p[x] { x = input.x}`,
+			// The developer likely intended a partial set.
+			expectedErrors: []string{
+				"rego_parse_error: `contains` keyword is required for partial set rules",
+				"rego_parse_error: `if` keyword is required before rule body",
+			},
+		},
+		{
+			note: "`if` keyword not used on partial object rule (ref-head)",
+			module: `package test
+import rego.v1
+p.q[x] { x = input.x}`,
+			expectedErrors: []string{
+				"rego_parse_error: `if` keyword is required before rule body",
+			},
+		},
+		{
+			note: "`if` keyword not used on default rule",
+			module: `package test
+import rego.v1
+default allow := false`,
+		},
+		{
+			note: "function, value assignment, no body",
+			module: `package test
+import rego.v1
+f(x) := x`,
+		},
+		{
+			note: "function, value assignment, body, with if",
+			module: `package test
+import rego.v1
+f(x) := x if {
+	x == 1
+}`,
+		},
+		{
+			note: "function, value assignment, body, no if",
+			module: `package test
+import rego.v1
+f(x) := x {
+	x == 1
+}`,
+			expectedErrors: []string{"rego_parse_error: `if` keyword is required before function body"},
+		},
+		{
+			note: "function, no value assignment, body, with if",
+			module: `package test
+import rego.v1
+f(x) if {
+	x == 1
+}`,
+		},
+		{
+			note: "function, no value assignment, body, no if",
+			module: `package test
+import rego.v1
+f(x) {
+	x == 1
+}`,
+			expectedErrors: []string{"rego_parse_error: `if` keyword is required before function body"},
+		},
+		{
+			note: "function, else without body, value assignment",
+			module: `package test
+import rego.v1
+f(x) := x if {
+	x == 1
+} else := 42`,
+		},
+		{
+			note: "function, else without body, value assignment only on else (regression test for #6364)",
+			module: `package test
+import rego.v1
+f(x) if {
+	x == 1
+} else := 42`,
+		},
+		{
+			note: "function, else with body and if, value assignment",
+			module: `package test
+import rego.v1
+f(x) := x if {
+	x == 1
+} else := 42 if {
+	x == 2
+}`,
+		},
+		{
+			note: "function, else with body and if, no value assignment",
+			module: `package test
+import rego.v1
+f(x) if {
+	x == 1
+} else if {
+	x == 2
+}`,
+		},
+		{
+			note: "function, else with body and no if, value assignment",
+			module: `package test
+import rego.v1
+f(x) := x if {
+	x == 1
+} else := 42 {
+	x == 2
+}`,
+			expectedErrors: []string{"rego_parse_error: `if` keyword is required before function body"},
+		},
+		{
+			note: "function, else with body and no if, no value assignment",
+			module: `package test
+import rego.v1
+f(x) if {
+	x == 1
+} else {
+	x == 2
+}`,
+			expectedErrors: []string{"rego_parse_error: `if` keyword is required before function body"},
+		},
+		{
+			note: "function, else with body and no if, value assignment on primary head",
+			module: `package test
+import rego.v1
+f(x) if {
+	x == 1
+} else := 42 {
+	x == 2
+}`,
+			expectedErrors: []string{"rego_parse_error: `if` keyword is required before function body"},
+		},
+		{
+			note: "function, else with body and no if, value assignment on else",
+			module: `package test
+import rego.v1
+f(x) := x if {
+	x == 1
+} else {
+	x == 2
+}`,
+			expectedErrors: []string{"rego_parse_error: `if` keyword is required before function body"},
+		},
+		{
+			note: "function, multiple else with body, no if on last else, value assignment",
+			module: `package test
+import rego.v1
+f(x) := x if {
+	x == 1
+} else := 1 if {
+	x == 2
+} else := 42 {
+	x == 2
+}`,
+			expectedErrors: []string{"rego_parse_error: `if` keyword is required before function body"},
+		},
+		{
+			note: "function, multiple else with body, no if on last else, value assignment on primary head",
+			module: `package test
+import rego.v1
+f(x) := x if {
+	x == 1
+} else if {
+	x == 2
+} else {
+	x == 2
+}`,
+			expectedErrors: []string{"rego_parse_error: `if` keyword is required before function body"},
+		},
+		{
+			note: "function, multiple else with body, no if on last else, value assignment on first else",
+			module: `package test
+import rego.v1
+f(x) if {
+	x == 1
+} else := 1 if {
+	x == 2
+} else {
+	x == 2
+}`,
+			expectedErrors: []string{"rego_parse_error: `if` keyword is required before function body"},
+		},
+		{
+			note: "function, multiple else with body, no if on last else, value assignment on last else",
+			module: `package test
+import rego.v1
+f(x) if {
+	x == 1
+} else if {
+	x == 2
+} else := 42 {
+	x == 2
+}`,
+			expectedErrors: []string{"rego_parse_error: `if` keyword is required before function body"},
+		},
+		{
+			note: "function, multiple else with body, no if on first else, value assignment",
+			module: `package test
+import rego.v1
+f(x) := x if {
+	x == 1
+} else := 1 {
+	x == 2
+} else := 42 if {
+	x == 2
+}`,
+			expectedErrors: []string{"rego_parse_error: `if` keyword is required before function body"},
+		},
+		{
+			note: "function, multiple else with body, no if on first else, value assignment on primary head",
+			module: `package test
+import rego.v1
+f(x) := x if {
+	x == 1
+} else {
+	x == 2
+} else if {
+	x == 2
+}`,
+			expectedErrors: []string{"rego_parse_error: `if` keyword is required before function body"},
+		},
+		{
+			note: "function, multiple else with body, no if on first else, value assignment on first else",
+			module: `package test
+import rego.v1
+f(x) if {
+	x == 1
+} else := 1 {
+	x == 2
+} else if {
+	x == 2
+}`,
+			expectedErrors: []string{"rego_parse_error: `if` keyword is required before function body"},
+		},
+		{
+			note: "function, multiple else with body, no if on first else, value assignment on last else",
+			module: `package test
+import rego.v1
+f(x) if {
+	x == 1
+} else {
+	x == 2
+} else := 42 if {
+	x == 2
+}`,
+			expectedErrors: []string{"rego_parse_error: `if` keyword is required before function body"},
+		},
+		{
+			note: "function, multiple else with body, no if on any else, value assignment",
+			module: `package test
+import rego.v1
+f(x) := x if {
+	x == 1
+} else := 1 {
+	x == 2
+} else := 42 {
+	x == 2
+}`,
+			expectedErrors: []string{"rego_parse_error: `if` keyword is required before function body"},
+		},
+		{
+			note: "function, multiple else with body, no if, value assignment",
+			module: `package test
+import rego.v1
+f(x) := x {
+	x == 1
+} else := 1 {
+	x == 2
+} else := 42 {
+	x == 2
+}`,
+			expectedErrors: []string{"rego_parse_error: `if` keyword is required before function body"},
+		},
+		{
+			note: "rule with chained bodies, no `if`",
+			module: `package test
+import rego.v1
+p {
+	input.x == 1
+} {
+	input.x == 2
+} {
+	input.x == 3
+}`,
+			expectedErrors: []string{"rego_parse_error: `if` keyword is required before rule body"},
+		},
+		{
+			note: "rule with chained bodies, `if` on first body",
+			module: `package test
+import rego.v1
+p if {
+	input.x == 1
+} {
+	input.x == 2
+} {
+	input.x == 3
+}`,
+		},
+		{
+			note: "rule with chained bodies, `if` on second body",
+			module: `package test
+import rego.v1
+p if {
+	input.x == 1
+} if {
+	input.x == 2
+} {
+	input.x == 3
+}`,
+			expectedErrors: []string{`5:3: rego_parse_error: unexpected if keyword
+	} if {
+	  ^`},
+		},
+		{
+			note: "rule with chained bodies, `if` on third/last body",
+			module: `package test
+import rego.v1
+p if {
+	input.x == 1
+} {
+	input.x == 2
+} if {
+	input.x == 3
+}`,
+			expectedErrors: []string{`7:3: rego_parse_error: unexpected if keyword
+	} if {
+	  ^`},
+		},
+		{
+			note: "rule with chained bodies, `if` and `contains` on first body",
+			module: `package test
+import rego.v1
+p contains x if {
+	x == 1
+} {
+	x == 2
+} {
+	x == 3
+}`,
+		},
+		{
+			note: "function with chained bodies, no `if`",
+			module: `package test
+import rego.v1
+f(x) {
+	x == 1
+} {
+	x == 2
+} {
+	x == 3
+}`,
+			expectedErrors: []string{"rego_parse_error: `if` keyword is required before function body"},
+		},
+		{
+			note: "function with chained bodies, `if` on first body",
+			module: `package test
+import rego.v1
+f(x) if {
+	x == 1
+} {
+	x == 2
+} {
+	x == 3
+}`,
+		},
+		{
+			note: "function with chained bodies, `if` on other than first body",
+			module: `package test
+import rego.v1
+f(x) if {
+	x == 1
+} if {
+	x == 2
+} {
+	x == 3
+}`,
+			expectedErrors: []string{`5:3: rego_parse_error: unexpected if keyword
+	} if {
+	  ^`},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.note, func(t *testing.T) {
+			_, errs := ParseModuleWithOpts("", tc.module, popts)
+
+			if len(tc.expectedErrors) == 0 && errs != nil {
+				t.Fatalf("expected no errors, got:\n\n%v", errs)
+			}
+
+			actual := ""
+			if errs != nil {
+				actual = errs.Error()
+			}
+
+			for _, expected := range tc.expectedErrors {
+				if !strings.Contains(actual, expected) {
+					t.Errorf("expected error:\n\n%q\n\ngot:\n\n%v", expected, actual)
 				}
 			}
 		})
@@ -1574,13 +2213,37 @@ func TestRule(t *testing.T) {
 	// TODO: expect expressions instead?
 	assertParseErrorContains(t, "empty body", `f(_) = y {}`, "rego_parse_error: found empty body")
 	assertParseErrorContains(t, "empty rule body", "p {}", "rego_parse_error: found empty body")
-	assertParseErrorContains(t, "unmatched braces", `f(x) = y { trim(x, ".", y) `, `rego_parse_error: unexpected eof token: expected \n or ; or }`)
+	assertParseErrorContains(t, "unmatched braces", `f(x) = y { trim(x, ".", y) `, `rego_parse_error: unexpected eof token: expected \n or ; or }
+	f(x) = y { trim(x, ".", y) 
+	                         ^`)
 
 	assertParseErrorContains(t, "no output", `f(_) = { "foo" = "bar" }`, "rego_parse_error: unexpected eq token: expected rule value term")
-	assertParseErrorContains(t, "no output", `f(_) := { "foo" = "bar" }`, "rego_parse_error: unexpected assign token: expected function value term")
-	assertParseErrorContains(t, "no output", `f := { "foo" = "bar" }`, "rego_parse_error: unexpected assign token: expected rule value term")
-	assertParseErrorContains(t, "no output", `f[_] := { "foo" = "bar" }`, "rego_parse_error: unexpected assign token: expected rule value term")
-	assertParseErrorContains(t, "no output", `default f :=`, "rego_parse_error: unexpected assign token: expected default rule value term")
+
+	assertParseErrorContains(t, "no output", `f(_) := { "foo" = "bar" }`, `rego_parse_error: unexpected eq token: non-terminated set
+	f(_) := { "foo" = "bar" }
+	                ^
+1:17: rego_parse_error: unexpected eq token: expected function value term (e.g., f(...) := <VALUE> { ... })
+	f(_) := { "foo" = "bar" }
+	                ^`)
+
+	assertParseErrorContains(t, "no output", `f := { "foo" = "bar" }`, `rego_parse_error: unexpected eq token: non-terminated set
+	f := { "foo" = "bar" }
+	             ^
+1:14: rego_parse_error: unexpected eq token: expected rule value term (e.g., f := <VALUE> { ... })
+	f := { "foo" = "bar" }
+	             ^`)
+	assertParseErrorContains(t, "no output", `f[_] := { "foo" = "bar" }`, `rego_parse_error: unexpected eq token: non-terminated set
+	f[_] := { "foo" = "bar" }
+	                ^
+1:17: rego_parse_error: unexpected eq token: expected rule value term (e.g., f[_] := <VALUE> { ... })
+	f[_] := { "foo" = "bar" }
+	                ^`)
+	assertParseErrorContains(t, "no output", `default f :=`, `rego_parse_error: unexpected eof token
+	default f :=
+	           ^
+1:12: rego_parse_error: unexpected eof token: expected default rule value term (e.g., default f := <VALUE>)
+	default f :=
+	           ^`)
 
 	// TODO(tsandall): improve error checking here. This is a common mistake
 	// and the current error message is not very good. Need to investigate if the
@@ -1673,7 +2336,7 @@ func TestRule(t *testing.T) {
 	tr := BooleanTerm(true)
 	head := func(v string) *Head { return &Head{Name: name, Reference: ref, Value: tr, Args: []*Term{VarTerm(v)}} }
 	assertParseModule(t, "wildcard in chained function heads", `package test
-	f(_) { true } { true }
+	f(_) if { true } { true }
 `, &Module{
 		Package: MustParsePackage(`package test`),
 		Rules: []*Rule{
@@ -1686,7 +2349,8 @@ func TestRule(t *testing.T) {
 				Body: MustParseBody("true"),
 			},
 		},
-	})
+	},
+		ParserOptions{AllFutureKeywords: true})
 }
 
 func TestRuleContains(t *testing.T) {
@@ -2006,6 +2670,7 @@ func TestRuleIf(t *testing.T) {
 				Head: &Head{
 					Name:      Var("p"),
 					Reference: MustParseRef("p[x]"),
+					Key:       VarTerm("x"),
 					Value:     VarTerm("y"),
 				},
 				Body: MustParseBody(`x := "foo"; y := "bar"`),
@@ -2041,6 +2706,7 @@ func TestRuleIf(t *testing.T) {
 			exp: &Rule{
 				Head: &Head{
 					Reference: MustParseRef("p[x]"),
+					Key:       VarTerm("x"),
 					Value:     BooleanTerm(true),
 				},
 				Body: MustParseBody(`x := 1`),
@@ -2052,6 +2718,7 @@ func TestRuleIf(t *testing.T) {
 			exp: &Rule{
 				Head: &Head{
 					Reference: MustParseRef("p[x]"),
+					Key:       VarTerm("x"),
 					Value:     BooleanTerm(true),
 				},
 				Body: MustParseBody(`x := 1`),
@@ -2137,6 +2804,7 @@ func TestRuleRefHeads(t *testing.T) {
 				Head: &Head{
 					Name:      Var("p"),
 					Reference: MustParseRef("p[x]"),
+					Key:       VarTerm("x"),
 					Value:     IntNumberTerm(1),
 				},
 				Body: MustParseBody("x := 2"),
@@ -2242,50 +2910,50 @@ q(0).r(0) { true }`,
 func TestRuleElseKeyword(t *testing.T) {
 	mod := `package test
 
-	p {
+	p if {
 		"p0"
 	}
 
-	p {
+	p if {
 		"p1"
-	} else {
+	} else if {
 		"p1_e1"
-	} else = [null] {
+	} else = [null] if {
 		"p1_e2"
-	} else = x {
+	} else = x if {
 		x = "p1_e3"
 	}
 
-	p {
+	p if {
 		"p2"
 	}
 
-	f(x) {
+	f(x) if {
 		x < 100
-	} else = false {
+	} else = false if {
 		x > 200
-	} else {
+	} else if {
 		x != 150
 	}
 
-	_ {
+	_ if {
 		x > 0
-	} else {
+	} else if {
 	    x == -1
-	} else {
+	} else if {
 		x > -100
 	}
 
-	nobody = 1 {
+	nobody = 1 if {
 		false
 	} else = 7
 
-	nobody_f(x) = 1 {
+	nobody_f(x) = 1 if {
 		false
 	} else = 7
 	`
 
-	parsed, err := ParseModule("", mod)
+	parsed, err := ParseModuleWithOpts("", mod, ParserOptions{AllFutureKeywords: true})
 	if err != nil {
 		t.Fatalf("Unexpected parse error: %v", err)
 	}
@@ -2595,9 +3263,9 @@ else := 2
 
 func TestMultipleEnclosedBodies(t *testing.T) {
 
-	result, err := ParseModule("", `package ex
+	result := module(`package ex
 
-p[x] = y {
+p[x] = y if {
 	x = "a"
 	y = 1
 } {
@@ -2607,31 +3275,25 @@ p[x] = y {
 
 q = 1
 
-f(x) {
+f(x) if {
 	x < 10
 } {
 	x > 1000
 }
-`,
-	)
+`)
 
-	if err != nil {
-		t.Fatalf("Unexpected parse error: %v", err)
-	}
+	expected := module(`package ex
 
-	expected := MustParseModule(`package ex
-
-p[x] = y { x = "a"; y = 1 }
-p[x] = y { x = "b"; y = 2 }
-q = 1 { true }
-f(x) { x < 10 }
-f(x) { x > 1000 }`,
+p[x] = y if { x = "a"; y = 1 }
+p[x] = y if { x = "b"; y = 2 }
+q = 1 if { true }
+f(x) if { x < 10 }
+f(x) if { x > 1000 }`,
 	)
 
 	if !expected.Equal(result) {
 		t.Fatal("Expected modules to be equal but got:\n\n", result, "\n\nExpected:\n\n", expected)
 	}
-
 }
 
 func TestEmptyModule(t *testing.T) {
@@ -2646,6 +3308,107 @@ func TestEmptyModule(t *testing.T) {
 }
 
 func TestComments(t *testing.T) {
+	testModule := `package a.b.c
+
+    import input.e.f as g  # end of line
+    import input.h
+
+    # by itself
+
+    p[x] = y if { y = "foo";
+        # inside a rule
+        x = "bar";
+        x != y;
+        q[x]
+	}
+
+    import input.xyz.abc
+
+    q # interrupting
+
+	contains a  # the head of a rule
+
+	if { m = [1,2,
+    3, ];
+    a = m[i]
+
+	}
+
+	r contains x if { x = [ a | # inside comprehension
+					  a = z[i]
+	                  b[i].a = a ]
+
+		y = { a | # inside set comprehension
+				a = z[i]
+			b[i].a = a}
+
+		z = {a: i | # inside object comprehension
+				a = z[i]
+			b[i].a = a}
+					  }`
+
+	popts := ParserOptions{AllFutureKeywords: true}
+
+	assertParseModule(t, "module comments", testModule, &Module{
+		Package: MustParseStatement(`package a.b.c`).(*Package),
+		Imports: []*Import{
+			MustParseStatement("import input.e.f as g").(*Import),
+			MustParseStatement("import input.h").(*Import),
+			MustParseStatement("import input.xyz.abc").(*Import),
+		},
+		Rules: []*Rule{
+			MustParseStatementWithOpts(`p[x] = y if { y = "foo"; x = "bar"; x != y; q[x] }`, popts).(*Rule),
+			MustParseStatementWithOpts(`q contains a if { m = [1, 2, 3]; a = m[i] }`, popts).(*Rule),
+			MustParseStatementWithOpts(`r contains x if { x = [a | a = z[i]; b[i].a = a]; y = {a |  a = z[i]; b[i].a = a}; z = {a: i | a = z[i]; b[i].a = a} }`, popts).(*Rule),
+		},
+	}, popts)
+
+	module, err := ParseModuleWithOpts("test.rego", testModule, popts)
+	if err != nil {
+		t.Fatal("Unexpected error:", err)
+	}
+
+	exp := []struct {
+		text string
+		row  int
+		col  int
+	}{
+		{text: "end of line", row: 3, col: 28},
+		{text: "by itself", row: 6, col: 5},
+		{text: "inside a rule", row: 9, col: 9},
+		{text: "interrupting", row: 17, col: 7},
+		{text: "the head of a rule", row: 19, col: 14},
+		{text: "inside comprehension", row: 27, col: 30},
+		{text: "inside set comprehension", row: 31, col: 13},
+		{text: "inside object comprehension", row: 35, col: 15},
+	}
+
+	if len(module.Comments) != len(exp) {
+		t.Fatalf("Expected %v comments but got %v", len(exp), len(module.Comments))
+	}
+
+	for i := range exp {
+
+		expc := &Comment{
+			Text: []byte(" " + exp[i].text),
+			Location: &Location{
+				File: "test.rego",
+				Text: []byte("# " + exp[i].text),
+				Row:  exp[i].row,
+				Col:  exp[i].col,
+			},
+		}
+
+		if !expc.Equal(module.Comments[i]) {
+			comment := module.Comments[i]
+			fmt.Printf("comment: %v %v %v %v\n", comment.Location.File, comment.Location.Text, comment.Location.Col, comment.Location.Row)
+			fmt.Printf("expcomm: %v %v %v %v\n", expc.Location.File, expc.Location.Text, expc.Location.Col, expc.Location.Row)
+			t.Errorf("Expected %q but got: %q (want: %d:%d, got: %d:%d)", expc, comment, exp[i].row, exp[i].col, comment.Location.Row, comment.Location.Col)
+		}
+	}
+}
+
+func TestCommentsV0(t *testing.T) {
 	testModule := `package a.b.c
 
     import input.e.f as g  # end of line
@@ -2685,6 +3448,8 @@ func TestComments(t *testing.T) {
 			b[i].a = a}
 					  }`
 
+	popts := ParserOptions{RegoVersion: RegoV0}
+
 	assertParseModule(t, "module comments", testModule, &Module{
 		Package: MustParseStatement(`package a.b.c`).(*Package),
 		Imports: []*Import{
@@ -2693,13 +3458,13 @@ func TestComments(t *testing.T) {
 			MustParseStatement("import input.xyz.abc").(*Import),
 		},
 		Rules: []*Rule{
-			MustParseStatement(`p[x] = y { y = "foo"; x = "bar"; x != y; q[x] }`).(*Rule),
-			MustParseStatement(`q[a] { m = [1, 2, 3]; a = m[i] }`).(*Rule),
-			MustParseStatement(`r[x] { x = [a | a = z[i]; b[i].a = a]; y = {a |  a = z[i]; b[i].a = a}; z = {a: i | a = z[i]; b[i].a = a} }`).(*Rule),
+			MustParseStatementWithOpts(`p[x] = y { y = "foo"; x = "bar"; x != y; q[x] }`, popts).(*Rule),
+			MustParseStatementWithOpts(`q[a] { m = [1, 2, 3]; a = m[i] }`, popts).(*Rule),
+			MustParseStatementWithOpts(`r[x] { x = [a | a = z[i]; b[i].a = a]; y = {a |  a = z[i]; b[i].a = a}; z = {a: i | a = z[i]; b[i].a = a} }`, popts).(*Rule),
 		},
-	})
+	}, popts)
 
-	module, err := ParseModule("test.rego", testModule)
+	module, err := ParseModuleWithOpts("test.rego", testModule, popts)
 	if err != nil {
 		t.Fatal("Unexpected error:", err)
 	}
@@ -2805,6 +3570,8 @@ func TestCommentsWhitespace(t *testing.T) {
 }
 
 func TestExample(t *testing.T) {
+	popts := ParserOptions{AllFutureKeywords: true}
+
 	assertParseModule(t, "example module", testModule, &Module{
 		Package: MustParseStatement(`package opa.examples`).(*Package),
 		Imports: []*Import{
@@ -2813,10 +3580,10 @@ func TestExample(t *testing.T) {
 			MustParseStatement("import data.ports").(*Import),
 		},
 		Rules: []*Rule{
-			MustParseStatement(`violations[server] { server = servers[i]; server.protocols[j] = "http"; public_servers[server] }`).(*Rule),
-			MustParseStatement(`public_servers[server] { server = servers[i]; server.ports[j] = ports[k].id; ports[k].networks[l] = networks[m].id; networks[m].public = true }`).(*Rule),
+			MustParseStatementWithOpts(`violations contains server if { server = servers[i]; server.protocols[j] = "http"; public_servers[server] }`, popts).(*Rule),
+			MustParseStatementWithOpts(`public_servers contains server if { server = servers[i]; server.ports[j] = ports[k].id; ports[k].networks[l] = networks[m].id; networks[m].public = true }`, popts).(*Rule),
 		},
-	})
+	}, popts)
 }
 
 func TestModuleParseErrors(t *testing.T) {
@@ -2844,7 +3611,7 @@ func TestModuleParseErrors(t *testing.T) {
 }
 
 func TestLocation(t *testing.T) {
-	mod, err := ParseModule("test", testModule)
+	mod, err := ParseModuleWithOpts("test", testModule, ParserOptions{AllFutureKeywords: true})
 	if err != nil {
 		t.Errorf("Unexpected error while parsing test module: %v", err)
 		return
@@ -2869,30 +3636,42 @@ func TestRuleFromBodyRefs(t *testing.T) {
 	// the same as parsing the string as a Rule directly. Without also passing
 	// TestRuleRefHeads, these tests are not to be trusted -- if changing something,
 	// start with getting TestRuleRefHeads to PASS.
+	//
+	// NOTE: Some of these test cases are invalid v1 Rego, and are locked to v0.
 	tests := []struct {
-		note string
-		rule string
-		exp  string
+		note        string
+		regoVersion RegoVersion
+		rule        string
+		exp         string
 	}{
 		{
-			note: "no dots: single-value rule (complete doc)",
-			rule: `foo["bar"] = 12`,
-			exp:  `foo["bar"] = 12 { true }`,
+			note:        "no dots: single-value rule (complete doc)",
+			regoVersion: RegoV0,
+			rule:        `foo["bar"] = 12`,
+			exp:         `foo["bar"] = 12 { true }`,
 		},
 		{
-			note: "no dots: partial set of numbers",
-			rule: `foo[1]`,
-			exp:  `foo[1] { true }`,
+			note:        "no dots: partial set of numbers",
+			regoVersion: RegoV0,
+			rule:        `foo[1]`,
+			exp:         `foo[1] { true }`,
 		},
 		{
-			note: "no dots: shorthand set of strings", // back compat
-			rule: `foo.one`,
-			exp:  `foo["one"] { true }`,
+			note:        "no dots: shorthand set of strings", // back compat
+			regoVersion: RegoV0,
+			rule:        `foo.one`,
+			exp:         `foo["one"] { true }`,
 		},
 		{
-			note: "no dots: partial set",
-			rule: `foo[x] { x = 1 }`,
-			exp:  `foo[x] { x = 1 }`,
+			note:        "no dots: partial set",
+			regoVersion: RegoV0,
+			rule:        `foo[x] { x = 1 }`,
+			exp:         `foo[x] { x = 1 }`,
+		},
+		{
+			note: "no dots + contains + if: partial set",
+			rule: `foo contains x if { x = 1 }`,
+			exp:  `foo contains x if { x = 1 }`,
 		},
 		{
 			note: "no dots + if: complete doc",
@@ -2910,9 +3689,15 @@ func TestRuleFromBodyRefs(t *testing.T) {
 			exp:  `foo(x) = y { true }`,
 		},
 		{
-			note: "no dots: partial set, ref element",
-			rule: `test[arr[0]]`,
-			exp:  `test[arr[0]] { true }`,
+			note:        "no dots: partial set, ref element",
+			regoVersion: RegoV0,
+			rule:        `test[arr[0]]`,
+			exp:         `test[arr[0]] { true }`,
+		},
+		{
+			note: "no dots + contains: partial set, ref element",
+			rule: `test contains arr[0]`,
+			exp:  `test contains arr[0] if { true }`,
 		},
 		{
 			note: "one dot: complete rule shorthand",
@@ -2925,9 +3710,15 @@ func TestRuleFromBodyRefs(t *testing.T) {
 			exp:  `foo.bar[x] = "buz" { true }`,
 		},
 		{
-			note: "one dot, bracket with var: partial set",
-			rule: `foo.bar[x] { x = 1 }`,
-			exp:  `foo.bar[x] { x = 1 }`,
+			note:        "one dot, bracket with var: partial set",
+			regoVersion: RegoV0,
+			rule:        `foo.bar[x] { x = 1 }`,
+			exp:         `foo.bar[x] { x = 1 }`,
+		},
+		{
+			note: "one dot, contains with var: partial set",
+			rule: `foo.bar contains x if { x = 1 }`,
+			exp:  `foo.bar contains x if { x = 1 }`,
 		},
 		{
 			note: "one dot, bracket with string: complete doc",
@@ -2936,8 +3727,8 @@ func TestRuleFromBodyRefs(t *testing.T) {
 		},
 		{
 			note: "one dot, bracket with var, rule body: partial object",
-			rule: `foo.bar[x] = "buz" { x = 1 }`,
-			exp:  `foo.bar[x] = "buz" { x = 1 }`,
+			rule: `foo.bar[x] = "buz" if { x = 1 }`,
+			exp:  `foo.bar[x] = "buz" if { x = 1 }`,
 		},
 		{
 			note: "one dot: function",
@@ -2951,18 +3742,30 @@ func TestRuleFromBodyRefs(t *testing.T) {
 		},
 		{
 			note: "two dots, bracket with var: partial object",
-			rule: `foo.bar.baz[x] = "buz" { x = 1 }`,
-			exp:  `foo.bar.baz[x] = "buz" { x = 1 }`,
+			rule: `foo.bar.baz[x] = "buz" if { x = 1 }`,
+			exp:  `foo.bar.baz[x] = "buz" if { x = 1 }`,
 		},
 		{
-			note: "two dots, bracket with var: partial set",
-			rule: `foo.bar.baz[x] { x = 1 }`,
-			exp:  `foo.bar.baz[x] { x = 1 }`,
+			note:        "two dots, bracket with var: partial set",
+			regoVersion: RegoV0,
+			rule:        `foo.bar.baz[x] { x = 1 }`,
+			exp:         `foo.bar.baz[x] { x = 1 }`,
 		},
 		{
-			note: "one dot, bracket with string, no key: complete doc",
-			rule: `foo.bar["baz"]`,
-			exp:  `foo.bar.baz { true }`,
+			note: "two dots, contains with var: partial set",
+			rule: `foo.bar.baz contains x if { x = 1 }`,
+			exp:  `foo.bar.baz contains x if { x = 1 }`,
+		},
+		{
+			note:        "one dot, bracket with string, no key: complete doc",
+			regoVersion: RegoV0,
+			rule:        `foo.bar["baz"]`,
+			exp:         `foo.bar.baz { true }`,
+		},
+		{
+			note: "one dot, bracket with string, no key, value: complete doc",
+			rule: `foo.bar["baz"] := true`,
+			exp:  `foo.bar.baz := true if { true }`,
 		},
 		{
 			note: "two dots: function",
@@ -2976,32 +3779,46 @@ func TestRuleFromBodyRefs(t *testing.T) {
 		},
 		{
 			note: "non-ground ref: complete doc",
-			rule: `foo.bar[i].baz { i := 1 }`,
-			exp:  `foo.bar[i].baz { i := 1 }`,
+			rule: `foo.bar[i].baz if { i := 1 }`,
+			exp:  `foo.bar[i].baz if { i := 1 }`,
 		},
 		{
-			note: "non-ground ref: partial set",
-			rule: `foo.bar[i].baz[x] { i := 1; x := 2 }`,
-			exp:  `foo.bar[i].baz[x] { i := 1; x := 2 }`,
+			note:        "non-ground ref, bracket-key: partial set",
+			regoVersion: RegoV0,
+			rule:        `foo.bar[i].baz[x] { i := 1; x := 2 }`,
+			exp:         `foo.bar[i].baz[x] { i := 1; x := 2 }`,
+		},
+		{
+			note: "non-ground ref, contains-key: partial set",
+			rule: `foo.bar[i].baz contains x if { i := 1; x := 2 }`,
+			exp:  `foo.bar[i].baz contains x if { i := 1; x := 2 }`,
 		},
 		{
 			note: "non-ground ref: partial object",
-			rule: `foo.bar[i].baz[x] = 3 { i := 1; x := 2 }`,
-			exp:  `foo.bar[i].baz[x] = 3 { i := 1; x := 2 }`,
+			rule: `foo.bar[i].baz[x] = 3 if { i := 1; x := 2 }`,
+			exp:  `foo.bar[i].baz[x] = 3 if { i := 1; x := 2 }`,
 		},
 		{
 			note: "non-ground ref: function",
-			rule: `foo.bar[i].baz(x) = 3 { i := 1 }`,
-			exp:  `foo.bar[i].baz(x) = 3 { i := 1 }`,
+			rule: `foo.bar[i].baz(x) = 3 if { i := 1 }`,
+			exp:  `foo.bar[i].baz(x) = 3 if { i := 1 }`,
 		},
 		{
-			note: "last term is number: partial set",
-			rule: `foo.bar.baz[3] { true }`,
-			exp:  `foo.bar.baz[3] { true }`,
+			note:        "last term is number: partial set",
+			regoVersion: RegoV0,
+			rule:        `foo.bar.baz[3] { true }`,
+			exp:         `foo.bar.baz[3] { true }`,
+		},
+		{
+			note: "contains with number: partial set",
+			rule: `foo.bar.baz contains 3 if { true }`,
+			exp:  `foo.bar.baz contains 3 if { true }`,
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.note, func(t *testing.T) {
+			opts.RegoVersion = tc.regoVersion
+
 			r, err := ParseRuleWithOpts(tc.exp, opts)
 			if err != nil {
 				t.Fatal(err)
@@ -3060,6 +3877,8 @@ func assertErrorWithMessage(t *testing.T, err error, msg string) {
 }
 
 func TestRuleFromBody(t *testing.T) {
+	popts := ParserOptions{RegoVersion: RegoV0}
+
 	tests := []struct {
 		input string
 		exp   string
@@ -3091,7 +3910,7 @@ func TestRuleFromBody(t *testing.T) {
 				Rules: []*Rule{
 					MustParseRule(tc.exp),
 				},
-			})
+			}, popts)
 		})
 	}
 
@@ -3100,7 +3919,7 @@ func TestRuleFromBody(t *testing.T) {
 	for _, tc := range tests {
 		testModule += tc.input + "\n"
 	}
-	module, err := ParseModule("test.rego", testModule)
+	module, err := ParseModuleWithOpts("test.rego", testModule, popts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3296,7 +4115,7 @@ func TestWildcards(t *testing.T) {
 func TestRuleFromBodyJSONOptions(t *testing.T) {
 	tests := []string{
 		`pi = 3.14159`,
-		`p[x] { x = 1 }`,
+		`p contains x if { x = 1 }`,
 		`greeting = "hello"`,
 		`cores = [{0: 1}, {1: 2}]`,
 		`wrapper = cores[0][1]`,
@@ -3304,10 +4123,10 @@ func TestRuleFromBodyJSONOptions(t *testing.T) {
 		`foo["bar"] = "buz"`,
 		`foo["9"] = "10"`,
 		`foo.buz = "bar"`,
-		`foo.fizz.buzz`,
-		`bar[1]`,
-		`bar[[{"foo":"baz"}]]`,
-		`bar.qux`,
+		`foo.fizz contains "buzz"`,
+		`bar contains 1`,
+		`bar contains [{"foo":"baz"}]`,
+		`bar contains "qux"`,
 		`input = 1`,
 		`data = 2`,
 		`f(1) = 2`,
@@ -3315,7 +4134,7 @@ func TestRuleFromBodyJSONOptions(t *testing.T) {
 		`d1 := 1234`,
 	}
 
-	parserOpts := ParserOptions{ProcessAnnotation: true}
+	parserOpts := ParserOptions{ProcessAnnotation: true, AllFutureKeywords: true}
 	parserOpts.JSONOptions = &astJSON.Options{
 		MarshalOptions: astJSON.MarshalOptions{
 			IncludeLocation: astJSON.NodeToggle{
@@ -3343,17 +4162,46 @@ func TestRuleFromBodyJSONOptions(t *testing.T) {
 	}
 }
 
+func TestRuleFromBodyJSONOptionsLocationOptions(t *testing.T) {
+	parserOpts := ParserOptions{ProcessAnnotation: true}
+	parserOpts.JSONOptions = &astJSON.Options{
+		MarshalOptions: astJSON.MarshalOptions{
+			IncludeLocation: astJSON.NodeToggle{
+				Term:           true,
+				Package:        true,
+				Comment:        true,
+				Import:         true,
+				Rule:           true,
+				Head:           true,
+				Expr:           true,
+				SomeDecl:       true,
+				Every:          true,
+				With:           true,
+				Annotations:    true,
+				AnnotationsRef: true,
+			},
+			IncludeLocationText: true,
+			ExcludeLocationFile: true,
+		},
+	}
+
+	module := `package a.b.c
+			foo := "bar"
+			`
+	assertParseModuleJSONOptions(t, `foo := "bar"`, module, parserOpts)
+}
+
 func TestRuleModulePtr(t *testing.T) {
 	mod := `package test
 
-	p { true }
-	p { true }
-	q { true }
+	p if { true }
+	p if { true }
+	q if { true }
 	r = 1
 	default s = 2
 	`
 
-	parsed, err := ParseModule("", mod)
+	parsed, err := ParseModuleWithOpts("", mod, ParserOptions{AllFutureKeywords: true})
 	if err != nil {
 		t.Fatalf("Unexpected parse error: %v", err)
 	}
@@ -3368,7 +4216,7 @@ func TestRuleModulePtr(t *testing.T) {
 func TestNoMatchError(t *testing.T) {
 	mod := `package test
 
-	p { true;
+	p if { true;
 		 1 != 0; # <-- parse error: no match
 	}`
 
@@ -3382,11 +4230,11 @@ func TestNoMatchError(t *testing.T) {
 
 	mod = `package test
 
-	p { true // <-- parse error: no match`
+	p if { true // <-- parse error: no match`
 
-	_, err = ParseModule("foo.rego", mod)
+	_, err = ParseModuleWithOpts("foo.rego", mod, ParserOptions{AllFutureKeywords: true})
 
-	loc := NewLocation([]byte{'/'}, "foo.rego", 3, 12)
+	loc := NewLocation([]byte{'/'}, "foo.rego", 3, 15)
 
 	if !loc.Equal(err.(Errors)[0].Location) {
 		t.Fatalf("Expected %v but got: %v", loc, err)
@@ -3638,20 +4486,20 @@ func TestRuleHeadLocation(t *testing.T) {
 
 	const input = `package pkg
 
-p[x] {
+p contains x if {
 	x = "hi"
 } {
 	x = "bye"
 }
 
-f(x) {
+f(x) if {
 	false
-} else = false {
+} else = false if {
 	true
 }
 `
 
-	module := MustParseModule(input)
+	module := module(input)
 
 	for _, tc := range []struct {
 		note         string
@@ -3664,7 +4512,7 @@ f(x) {
 			location:    module.Rules[0].Location,
 			expectedRow: 3,
 			expectedText: `
-p[x] {
+p contains x if {
 	x = "hi"
 }
 			`,
@@ -3673,7 +4521,7 @@ p[x] {
 			note:         "partial rule head",
 			location:     module.Rules[0].Head.Location,
 			expectedRow:  3,
-			expectedText: `p[x]`,
+			expectedText: `p contains x`,
 		},
 		{
 			note:         "partial rule head key",
@@ -3716,9 +4564,9 @@ p[x] {
 			location:    module.Rules[2].Location,
 			expectedRow: 9,
 			expectedText: `
-f(x) {
+f(x) if {
 	false
-} else = false {
+} else = false if {
 	true
 }
 			`,
@@ -3740,7 +4588,7 @@ f(x) {
 			location:    module.Rules[2].Else.Location,
 			expectedRow: 11,
 			expectedText: `
-else = false {
+else = false if {
 	true
 }
 			`,
@@ -3870,7 +4718,7 @@ func TestParserText(t *testing.T) {
 func TestRuleText(t *testing.T) {
 	input := ` package test
 
-r[x] = y {
+r[x] = y if {
 	x = input.a
 	x = "foo"
 } {
@@ -3881,13 +4729,13 @@ r[x] = y {
 	x = "baz"
 }
 
-r[x] = y {
+r[x] = y if {
 	x = input.d
 	x = "qux"
 }
 `
 
-	mod := MustParseModule(input)
+	mod := module(input)
 	rules := mod.Rules
 
 	if len(rules) != 4 {
@@ -3896,7 +4744,7 @@ r[x] = y {
 
 	expectedRuleText := []string{
 		`
-r[x] = y {
+r[x] = y if {
 	x = input.a
 	x = "foo"
 }
@@ -3914,7 +4762,7 @@ r[x] = y {
 }
 		`,
 		`
-r[x] = y {
+r[x] = y if {
 	x = input.d
 	x = "qux"
 }
@@ -4069,7 +4917,7 @@ import data.ports
 # scope: rule
 # schemas:
 #   - data.servers: schema.servers
-public_servers[server] {
+public_servers contains server if {
 	server = servers[i]; server.ports[j] = ports[k].id
 	ports[k].networks[l] = networks[m].id;
 	networks[m].public = true
@@ -4099,7 +4947,7 @@ import data.ports
 #   - data.servers: schema.servers
 #   - data.networks: schema.networks
 #   - data.ports: schema.ports
-public_servers[server] {
+public_servers contains server if {
 	server = servers[i]; server.ports[j] = ports[k].id
 	ports[k].networks[l] = networks[m].id;
 	networks[m].public = true
@@ -4133,7 +4981,7 @@ import data.ports
 #   - data.ports: schema.ports
 
 # This is a comment after the metadata YAML
-public_servers[server] {
+public_servers contains server if {
 	server = servers[i]; server.ports[j] = ports[k].id
 	ports[k].networks[l] = networks[m].id;
 	networks[m].public = true
@@ -4166,7 +5014,7 @@ import data.ports
 #   - data.networks: schema.networks
 #   - data.ports: schema.ports
 #
-public_servers[server] {
+public_servers contains server if {
 	server = servers[i]; server.ports[j] = ports[k].id
 	ports[k].networks[l] = networks[m].id;
 	networks[m].public = true
@@ -4315,13 +5163,13 @@ import data.ports
 #   - data.servers: schema.servers
 #   - data.networks: schema.networks
 #   - data.ports: schema.ports
-public_servers[server] {
+public_servers contains server if {
 	server = servers[i]; server.ports[j] = ports[k].id
 	ports[k].networks[l] = networks[m].id;
 	networks[m].public = true
 }
 
-public_servers_1[server] {
+public_servers_1 contains server if {
 	server = servers[i]; server.ports[j] = ports[k].id
 	ports[k].networks[l] = networks[m].id;
 	networks[m].public = true
@@ -4352,7 +5200,7 @@ import data.ports
 # scope: rule
 # schemas:
 #   - data.servers: schema.servers
-public_servers[server] {
+public_servers contains server if {
 	server = servers[i]
 }
 
@@ -4361,7 +5209,7 @@ public_servers[server] {
 # schemas:
 #   - data.networks: schema.networks
 #   - data.ports: schema.ports
-public_servers_1[server] {
+public_servers_1 contains server if {
 	ports[k].networks[l] = networks[m].id;
 	networks[m].public = true
 }`,
@@ -4394,7 +5242,7 @@ public_servers_1[server] {
 
 # METADATA
 # title: My rule 2
-p { input = "str" }`,
+p if { input = "str" }`,
 			expNumComments: 4,
 			expAnnotations: []*Annotations{
 				{
@@ -4414,7 +5262,7 @@ p { input = "str" }`,
 # METADATA
 
 # scope: rule
-p { input.x > 7 }`,
+p if { input.x > 7 }`,
 			expError: "test.rego:3: rego_parse_error: expected METADATA block, found whitespace",
 		},
 		{
@@ -4436,7 +5284,7 @@ p := 7`,
 # title: My package
 package test
 
-p { input = "str" }`,
+p if { input = "str" }`,
 			expNumComments: 2,
 			expAnnotations: []*Annotations{
 				{
@@ -4453,7 +5301,7 @@ p { input = "str" }`,
 # title: My import
 import input.foo
 
-p { input = "str" }`,
+p if { input = "str" }`,
 			expNumComments: 2,
 			expError:       "1 error occurred: test.rego:3: rego_parse_error: invalid annotation scope 'import'",
 		},
@@ -4523,7 +5371,7 @@ import data.foo`,
 # METADATA
 # schemas:
 # - input: {"type": "string"}
-p { input = "str" }`,
+p if { input = "str" }`,
 			expNumComments: 3,
 			expAnnotations: []*Annotations{
 				{
@@ -4549,7 +5397,7 @@ p { input = "str" }`,
 # - Tyrell Corp.
 # related_resources:
 # - https://example.com
-# - 
+# -
 #  ref: http://john:123@do.re/mi?foo=bar#baz
 #  description: foo bar
 # authors:
@@ -4569,7 +5417,7 @@ p { input = "str" }`,
 #  number: 42
 #  string: foo bar baz
 #  flag:
-p { input = "str" }`,
+p if { input = "str" }`,
 			expNumComments: 31,
 			expAnnotations: []*Annotations{
 				{
@@ -4621,6 +5469,7 @@ p { input = "str" }`,
 		t.Run(tc.note, func(t *testing.T) {
 			mod, err := ParseModuleWithOpts("test.rego", tc.module, ParserOptions{
 				ProcessAnnotation: true,
+				AllFutureKeywords: true,
 			})
 			if err != nil {
 				if tc.expError == "" || !strings.Contains(err.Error(), tc.expError) {
@@ -4648,6 +5497,503 @@ p { input = "str" }`,
 				t.Fatalf("expected %v but got %v", tc.expAnnotations, mod.Annotations)
 			}
 		})
+	}
+}
+
+func TestAnnotationsAttachedToRule(t *testing.T) {
+
+	tests := []struct {
+		note           string
+		module         string
+		expAnnotations map[int][]*Annotations
+	}{
+		{
+			note: "single metadata block for rule (implied rule scope)",
+			module: `# METADATA
+# title: pkg
+# description: pkg
+package test
+
+# METADATA
+# title: p
+# description: p
+p := 1`,
+			expAnnotations: map[int][]*Annotations{9: {{
+				Description: "p",
+				Scope:       "rule",
+				Title:       "p",
+			}}},
+		},
+		{
+			note: "single metadata block for rule (explicit rule scope)",
+			module: `# METADATA
+# title: pkg
+# description: pkg
+package test
+
+# METADATA
+# title: p
+# description: p
+# scope: rule
+p := 1`,
+			expAnnotations: map[int][]*Annotations{10: {{
+				Description: "p",
+				Scope:       "rule",
+				Title:       "p",
+			}}},
+		},
+		{
+			note: "multiple metadata blocks for single rule",
+			module: `# METADATA
+# title: pkg
+# description: pkg
+package test
+
+# METADATA
+# title: One
+
+# METADATA
+# title: Two
+
+# METADATA
+# title: Three
+
+# METADATA
+# title: Four
+p := 1`,
+			expAnnotations: map[int][]*Annotations{17: {
+				{
+					Scope: "rule",
+					Title: "One",
+				},
+				{
+					Scope: "rule",
+					Title: "Two",
+				}, {
+					Scope: "rule",
+					Title: "Three",
+				},
+				{
+					Scope: "rule",
+					Title: "Four",
+				},
+			}},
+		},
+		{
+			note: "document scope",
+			module: `# METADATA
+# title: pkg
+# description: pkg
+package test
+
+# METADATA
+# scope: document
+# title: doc
+# description: doc
+
+p := 1`,
+			expAnnotations: map[int][]*Annotations{11: {{
+				Description: "doc",
+				Scope:       "document",
+				Title:       "doc",
+			}}},
+		},
+		{
+			note: "document and rule scope (single rule)",
+			module: `# METADATA
+# title: pkg
+# description: pkg
+package test
+
+# METADATA
+# scope: document
+# title: doc
+# description: doc
+
+# METADATA
+# title: p
+# description: p
+p := 1`,
+			expAnnotations: map[int][]*Annotations{14: {
+				{
+					Description: "doc",
+					Scope:       "document",
+					Title:       "doc",
+				},
+				{
+					Description: "p",
+					Scope:       "rule",
+					Title:       "p",
+				},
+			}},
+		},
+		{
+			note: "document and rule scope (multiple rules)",
+			module: `# METADATA
+# title: pkg
+# description: pkg
+package test
+
+# METADATA
+# scope: document
+# title: doc
+# description: doc
+
+# METADATA
+# title: p
+# description: p
+p := 1
+
+# METADATA
+# title: q
+# description: q
+q := 1`,
+			expAnnotations: map[int][]*Annotations{
+				14: {
+					{
+						Description: "doc",
+						Scope:       "document",
+						Title:       "doc",
+					},
+					{
+						Description: "p",
+						Scope:       "rule",
+						Title:       "p",
+					},
+				},
+				19: {
+					{
+						Description: "q",
+						Scope:       "rule",
+						Title:       "q",
+					},
+				},
+			},
+		},
+		{
+			note: "document and rule scope (unordered annotations, multiple rules)",
+			module: `# METADATA
+# title: pkg
+# description: pkg
+package test
+
+# METADATA
+# scope: document
+# title: p-rules
+
+# METADATA
+# title: p-1
+# description: p-1
+p contains 1
+
+# METADATA
+# title: p-2
+# description: p-2
+p contains 2
+
+# METADATA
+# title: q
+# description: q
+q := 1`,
+			expAnnotations: map[int][]*Annotations{
+				13: {
+					{
+						Scope: "document",
+						Title: "p-rules",
+					},
+					{
+						Description: "p-1",
+						Scope:       "rule",
+						Title:       "p-1",
+					},
+				},
+				18: {
+					{
+						Scope: "document",
+						Title: "p-rules",
+					},
+					{
+						Description: "p-2",
+						Scope:       "rule",
+						Title:       "p-2",
+					},
+				},
+				23: {
+					{
+						Description: "q",
+						Scope:       "rule",
+						Title:       "q",
+					},
+				},
+			},
+		},
+		{
+			note: "document and rule scope (unordered annotations, multiple unordered rules)",
+			module: `# METADATA
+# title: pkg
+# description: pkg
+package test
+
+# METADATA
+# scope: document
+# title: p-rules
+
+# METADATA
+# title: p-1
+# description: p-1
+p contains 1
+
+# METADATA
+# title: q
+# description: q
+q := 1
+
+# METADATA
+# title: p-2
+# description: p-2
+p contains 2
+`,
+			expAnnotations: map[int][]*Annotations{
+				13: {
+					{
+						Scope: "document",
+						Title: "p-rules",
+					},
+					{
+						Description: "p-1",
+						Scope:       "rule",
+						Title:       "p-1",
+					},
+				},
+				18: {
+					{
+						Description: "q",
+						Scope:       "rule",
+						Title:       "q",
+					},
+				},
+				23: {
+					{
+						Scope: "document",
+						Title: "p-rules",
+					},
+					{
+						Description: "p-2",
+						Scope:       "rule",
+						Title:       "p-2",
+					},
+				},
+			},
+		},
+		{
+			note: "rule with variable in ref head",
+			module: `package test
+
+# METADATA
+# title: foo
+rule[x] := true if x := 1
+			`,
+			expAnnotations: map[int][]*Annotations{
+				5: {
+					{
+						Scope: "rule",
+						Title: "foo",
+					},
+				},
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.note, func(t *testing.T) {
+
+			pm, err := ParseModuleWithOpts("test.rego", tc.module, ParserOptions{
+				ProcessAnnotation: true,
+				AllFutureKeywords: true,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			for _, rule := range pm.Rules {
+				annotations, ok := tc.expAnnotations[rule.Location.Row]
+				if !ok {
+					t.Fatalf("No annotations for rule on row %v", rule.Location.Row)
+				}
+
+				if annotationsCompare(annotations, rule.Annotations) != 0 {
+					t.Fatalf("expected rule on row %d to have annotations:\n\n%v\n\nbut got:\n\n%v",
+						rule.Location.Row, annotations, rule.Annotations)
+				}
+			}
+		})
+	}
+}
+
+func TestAnnotationsAttachedToRuleMixScope(t *testing.T) {
+
+	module := `# METADATA
+# title: pkg
+# description: pkg
+package test
+
+import rego.v1
+
+# METADATA
+# scope: document
+# title: doc
+# description: doc
+
+# METADATA
+# title: p1
+# description: p1
+p contains x if {
+	input.x == 1
+	x := "hello"
+}
+
+# METADATA
+# title: p2
+# description: p2
+p contains x if {
+	input.x == 2
+	x := "world"
+}
+
+# METADATA
+# title: q
+# description: q
+q := 1`
+
+	pm, err := ParseModuleWithOpts("test.rego", module, ParserOptions{ProcessAnnotation: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	a1 := []*Annotations{
+		{
+			Description: "doc",
+			Scope:       "document",
+			Title:       "doc",
+		},
+		{
+			Description: "p1",
+			Scope:       "rule",
+			Title:       "p1",
+		},
+	}
+
+	a2 := []*Annotations{
+		{
+			Description: "doc",
+			Scope:       "document",
+			Title:       "doc",
+		},
+		{
+			Description: "p2",
+			Scope:       "rule",
+			Title:       "p2",
+		},
+	}
+
+	a3 := []*Annotations{
+		{
+			Description: "q",
+			Scope:       "rule",
+			Title:       "q",
+		},
+	}
+
+	expAnnotations := [][]*Annotations{a1, a2, a3}
+
+	for i, rule := range pm.Rules {
+		if annotationsCompare(expAnnotations[i], rule.Annotations) != 0 {
+			t.Fatalf("expected %v but got %v", expAnnotations[i], rule.Annotations)
+		}
+	}
+}
+
+func TestAnnotationsAttachedToRuleDocScopeBeforeRule(t *testing.T) {
+
+	module := `# METADATA
+# title: pkg
+# description: pkg
+package test
+
+import rego.v1
+
+# METADATA
+# title: p1
+# description: p1
+
+# METADATA
+# scope: document
+# title: doc
+# description: doc
+
+p contains x if {
+	input.x == 1
+	x := "hello"
+}
+
+# METADATA
+# title: p2
+# description: p2
+p contains x if {
+	input.x == 2
+	x := "world"
+}
+
+# METADATA
+# title: q
+# description: q
+q := 1`
+
+	pm, err := ParseModuleWithOpts("test.rego", module, ParserOptions{ProcessAnnotation: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	a1 := []*Annotations{
+		{
+			Description: "p1",
+			Scope:       "rule",
+			Title:       "p1",
+		},
+		{
+			Description: "doc",
+			Scope:       "document",
+			Title:       "doc",
+		},
+	}
+
+	a2 := []*Annotations{
+		{
+			Description: "doc",
+			Scope:       "document",
+			Title:       "doc",
+		},
+		{
+			Description: "p2",
+			Scope:       "rule",
+			Title:       "p2",
+		},
+	}
+
+	a3 := []*Annotations{
+		{
+			Description: "q",
+			Scope:       "rule",
+			Title:       "q",
+		},
+	}
+
+	expAnnotations := [][]*Annotations{a1, a2, a3}
+
+	for i, rule := range pm.Rules {
+		if annotationsCompare(expAnnotations[i], rule.Annotations) != 0 {
+			t.Fatalf("expected %v but got %v", expAnnotations[i], rule.Annotations)
+		}
 	}
 }
 
@@ -4781,6 +6127,27 @@ func TestAnnotationsAugmentedError(t *testing.T) {
 				t.Fatalf("expected error location row %v, got %v", tc.expErrorRow, loc.Row)
 			}
 		})
+	}
+}
+
+// https://github.com/open-policy-agent/opa/issues/6587
+func TestAnnotationsParseErrorOnFirstRowGetsCorrectLocation(t *testing.T) {
+	module := `# METADATA
+# description: ` + "`foo` bars" + `
+# title: foo
+package foo`
+
+	_, err := ParseModuleWithOpts("test.rego", module, ParserOptions{ProcessAnnotation: true})
+	if err == nil {
+		t.Fatalf("Expected error but got none")
+	}
+
+	if len(err.(Errors)) != 1 {
+		t.Fatalf("Expected exactly one error but got %v", err)
+	}
+
+	if err.(Errors)[0].Location.Row != 2 {
+		t.Errorf("Expected error on row 2 but got error on row %d", err.(Errors)[0].Location.Row)
 	}
 }
 
@@ -5043,6 +6410,32 @@ func TestRelatedResourceAnnotation(t *testing.T) {
 	}
 }
 
+func TestAnnotationsLocationText(t *testing.T) {
+	module := `# METADATA
+# title: pkg
+# description: a package
+package pkg
+
+import rego.v1
+
+# METADATA
+# title: rule
+allow if {
+	true
+}
+`
+
+	m, err := ParseModuleWithOpts("test.rego", module, ParserOptions{ProcessAnnotation: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	assertLocationText(t, "# METADATA\n# title: pkg\n# description: a package", m.Annotations[0].Location)
+	assertLocationText(t, "# METADATA\n# title: rule", m.Annotations[1].Location)
+
+	assertLocationText(t, "# METADATA\n# title: rule", m.Rules[0].Annotations[0].Location)
+}
+
 func assertLocationText(t *testing.T, expected string, actual *Location) {
 	t.Helper()
 	if actual == nil || actual.Text == nil {
@@ -5104,6 +6497,8 @@ func assertParseImport(t *testing.T, msg string, input string, correct *Import, 
 }
 
 func assertParseModule(t *testing.T, msg string, input string, correct *Module, opts ...ParserOptions) {
+	t.Helper()
+
 	opt := ParserOptions{}
 	if len(opts) == 1 {
 		opt = opts[0]
@@ -5171,6 +6566,23 @@ func assertParseModuleError(t *testing.T, msg, input string) {
 	m, err := ParseModule("", input)
 	if err == nil {
 		t.Errorf("Error on test \"%s\": expected parse error: %v (parsed)", msg, m)
+	}
+}
+
+func assertParseModuleErrorMatch(t *testing.T, msg, input string, expected string, opts ...ParserOptions) {
+	t.Helper()
+
+	opt := ParserOptions{}
+	if len(opts) == 1 {
+		opt = opts[0]
+	}
+
+	m, err := ParseModuleWithOpts("", input, opt)
+	if err == nil {
+		t.Errorf("Error on test \"%s\": expected parse error: %v (parsed)", msg, m)
+	}
+	if !strings.Contains(err.Error(), expected) {
+		t.Errorf("Error on test \"%s\"; expected:\n\n%v\n\ngot:\n\n%v", msg, expected, err)
 	}
 }
 

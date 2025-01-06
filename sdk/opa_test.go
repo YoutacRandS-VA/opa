@@ -11,10 +11,15 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
+	promdto "github.com/prometheus/client_model/go"
 
 	"github.com/fortytw2/leaktest"
 	"github.com/google/go-cmp/cmp"
@@ -23,6 +28,7 @@ import (
 	"github.com/open-policy-agent/opa/ast"
 	"github.com/open-policy-agent/opa/config"
 	"github.com/open-policy-agent/opa/hooks"
+	"github.com/open-policy-agent/opa/internal/file/archive"
 	"github.com/open-policy-agent/opa/logging"
 	loggingtest "github.com/open-policy-agent/opa/logging/test"
 	"github.com/open-policy-agent/opa/metrics"
@@ -35,6 +41,7 @@ import (
 	"github.com/open-policy-agent/opa/topdown"
 	"github.com/open-policy-agent/opa/topdown/builtins"
 	"github.com/open-policy-agent/opa/topdown/lineage"
+	"github.com/open-policy-agent/opa/util/test"
 	"github.com/open-policy-agent/opa/version"
 )
 
@@ -325,12 +332,13 @@ func TestDecisionWithStrictBuiltinErrors(t *testing.T) {
 		sdktest.MockBundle("/bundles/bundle.tar.gz", map[string]string{
 			"main.rego": `
 package example
+import rego.v1
 
-erroring_function(number) = output {
+erroring_function(number) = output if {
 	output := number / 0
 }
 
-allow {
+allow if {
 	erroring_function(1)
 }
 `,
@@ -387,8 +395,9 @@ func TestDecisionWithTrace(t *testing.T) {
 		sdktest.MockBundle("/bundles/bundle.tar.gz", map[string]string{
 			"main.rego": `
 package system
+import rego.v1
 
-main {
+main if {
 	trace("foobar")
 	true
 }
@@ -813,8 +822,9 @@ func TestPartial(t *testing.T) {
 		sdktest.MockBundle("/bundles/bundle.tar.gz", map[string]string{
 			"main.rego": `
 package test
+import rego.v1
 
-allow {
+allow if {
 	data.junk.x = input.y
 }
 `,
@@ -892,12 +902,13 @@ func TestPartialWithStrictBuiltinErrors(t *testing.T) {
 		sdktest.MockBundle("/bundles/bundle.tar.gz", map[string]string{
 			"main.rego": `
 package example
+import rego.v1
 
-erroring_function(number) = output {
+erroring_function(number) = output if {
 	output := number / 0
 }
 
-allow {
+allow if {
 	erroring_function(1)
 }
 `,
@@ -963,8 +974,9 @@ func TestPartialWithTrace(t *testing.T) {
 		sdktest.MockBundle("/bundles/bundle.tar.gz", map[string]string{
 			"main.rego": `
 package system
+import rego.v1
 
-main {
+main if {
 	trace("foobar")
 }
 `,
@@ -1044,8 +1056,9 @@ func TestPartialWithMetrics(t *testing.T) {
 		sdktest.MockBundle("/bundles/bundle.tar.gz", map[string]string{
 			"main.rego": `
 package test
+import rego.v1
 
-allow {
+allow if {
 	data.junk.x = input.y
 }
 `,
@@ -1128,8 +1141,9 @@ func TestPartialWithInstrumentationAndProfile(t *testing.T) {
 		sdktest.MockBundle("/bundles/bundle.tar.gz", map[string]string{
 			"main.rego": `
 package test
+import rego.v1
 
-allow {
+allow if {
 	data.junk.x = input.y
 }
 `,
@@ -1233,8 +1247,9 @@ func TestPartialWithProvenance(t *testing.T) {
 		sdktest.MockBundle("/bundles/bundle.tar.gz", map[string]string{
 			"main.rego": `
 package test
+import rego.v1
 
-allow {
+allow if {
 	data.junk.x = input.y
 }
 `,
@@ -1308,8 +1323,9 @@ func TestPartialWithConfigurableID(t *testing.T) {
 		sdktest.MockBundle("/bundles/bundle.tar.gz", map[string]string{
 			"main.rego": `
 package test
+import rego.v1
 
-allow {
+allow if {
 	data.junk.x = input.y
 }
 `,
@@ -1513,10 +1529,11 @@ loopback = input
 `,
 			"log.rego": `
 package system.log
+import rego.v1
 
-mask["/input/secret"]
-mask["/input/top/secret"]
-mask["/input/dossier/1/highly"]
+mask contains "/input/secret"
+mask contains "/input/top/secret"
+mask contains "/input/dossier/1/highly"
 `,
 		}),
 	)
@@ -1794,6 +1811,436 @@ main = 7
 		t.Fatalf("expected %v but got %v", exp, result.Result)
 	}
 
+}
+
+func TestDiscoveryBundleRegoV1(t *testing.T) {
+	tests := []struct {
+		note            string
+		v1Compatible    bool
+		discoveryBundle map[string]string
+		policyBundle    map[string]string
+		expErr          string
+	}{
+		{
+			note: "0.x compatible, keywords not imported ind disco bundle",
+			discoveryBundle: map[string]string{
+				"bundles.rego": `
+package bundles
+
+foo contains "bar"
+
+# This will be interpreted as two rules - 'test.resource' and 'if' - so we have foo above to force an error
+test.resource := b if {
+	b := "/bundles/bundle.tar.gz"
+}`,
+			},
+			policyBundle: map[string]string{
+				"main.rego": `
+package system
+
+import future.keywords
+
+main := v if { v := 7 }`,
+			},
+			expErr: "rego_parse_error",
+		},
+
+		{
+			note: "0.x compatible, keywords not imported ind policy bundle",
+			discoveryBundle: map[string]string{
+				"bundles.rego": `
+package bundles
+
+import future.keywords
+
+test.resource := b if {
+	b := "/bundles/bundle.tar.gz"
+}`,
+			},
+			policyBundle: map[string]string{
+				"main.rego": `
+package system
+
+foo contains "bar"
+
+# This will be interpreted as two rules - 'main' and 'if' - so we have foo above to force an error
+main := v if { v := 7 }`,
+			},
+			expErr: "rego_parse_error",
+		},
+
+		{
+			note: "0.x compatible, keywords imported",
+			discoveryBundle: map[string]string{
+				"bundles.rego": `
+package bundles
+
+import future.keywords
+
+test.resource := b if {
+	b := "/bundles/bundle.tar.gz"
+}`,
+			},
+			policyBundle: map[string]string{
+				"main.rego": `
+package system
+
+import future.keywords
+
+main := v if { v := 7 }`,
+			},
+		},
+		{
+			note: "0.x compatible, rego.v1 imported",
+			discoveryBundle: map[string]string{
+				"bundles.rego": `
+package bundles
+
+import rego.v1
+
+test.resource := b if {
+	b := "/bundles/bundle.tar.gz"
+}`,
+			},
+			policyBundle: map[string]string{
+				"main.rego": `
+package system
+
+import rego.v1
+
+main := v if { v := 7 }`,
+			},
+		},
+		{
+			note:         "1.0 compatible, keywords not imported",
+			v1Compatible: true,
+			// Discovery and policy bundles are rego-v1 compatible, but rego-v0 incompatible (if keyword used without import)
+			discoveryBundle: map[string]string{
+				"bundles.rego": `
+package bundles
+
+test.resource := b if {
+	b := "/bundles/bundle.tar.gz"
+}`,
+			},
+			policyBundle: map[string]string{
+				"main.rego": `
+package system
+
+main := v if { v := 7 }`,
+			},
+		},
+		{
+			note:         "1.0 compatible, keywords imported",
+			v1Compatible: true,
+			discoveryBundle: map[string]string{
+				"bundles.rego": `
+package bundles
+
+import future.keywords
+
+test.resource := b if {
+	b := "/bundles/bundle.tar.gz"
+}`,
+			},
+			policyBundle: map[string]string{
+				"main.rego": `
+package system
+
+import future.keywords
+
+main := v if { v := 7 }`,
+			},
+		},
+		{
+			note:         "1.0 compatible, rego.v1 imported",
+			v1Compatible: true,
+			discoveryBundle: map[string]string{
+				"bundles.rego": `
+package bundles
+
+import rego.v1
+
+test.resource := b if {
+	b := "/bundles/bundle.tar.gz"
+}`,
+			},
+			policyBundle: map[string]string{
+				"main.rego": `
+package system
+
+import rego.v1
+
+main := v if { v := 7 }`,
+			},
+		},
+		{
+			note:         "1.0 compatible, keywords not used in discovery bundle",
+			v1Compatible: true,
+			discoveryBundle: map[string]string{
+				"bundles.rego": `
+package bundles
+
+import rego.v1
+
+test.resource := b {
+	b := "/bundles/bundle.tar.gz"
+}`,
+			},
+			expErr: "rego_parse_error",
+		},
+		{
+			note:         "1.0 compatible, keywords not used in policy bundle",
+			v1Compatible: true,
+			discoveryBundle: map[string]string{
+				"bundles.rego": `
+package bundles
+
+import rego.v1
+
+test.resource := b if {
+	b := "/bundles/bundle.tar.gz"
+}`,
+			},
+			policyBundle: map[string]string{
+				"main.rego": `
+package system
+
+import rego.v1
+
+main := v { v := 7 }`,
+			},
+			expErr: "rego_parse_error",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.note, func(t *testing.T) {
+			ctx := context.Background()
+
+			serverOpts := []func(*sdktest.Server) error{
+				sdktest.MockBundle("/bundles/discovery.tar.gz", tc.discoveryBundle),
+				sdktest.MockBundle("/bundles/bundle.tar.gz", tc.policyBundle),
+				sdktest.RawBundles(true),
+			}
+			server := sdktest.MustNewServer(serverOpts...)
+			defer server.Stop()
+
+			c := fmt.Sprintf(`{
+				"services": {
+					"test": {
+						"url": %q
+					}
+				},
+				"discovery": {
+					"resource": "/bundles/discovery.tar.gz"
+				}
+			}`, server.URL())
+
+			var readyCh chan struct{}
+			var logger logging.Logger
+			if tc.expErr != "" {
+				logger = loggingtest.New()
+				logger.SetLevel(logging.Info)
+				readyCh = make(chan struct{})
+			} else {
+				logger = logging.NewNoOpLogger()
+			}
+
+			opa, err := sdk.New(ctx, sdk.Options{
+				Logger:       logger,
+				Ready:        readyCh,
+				Config:       strings.NewReader(c),
+				RegoVersion:  ast.RegoV0,
+				V1Compatible: tc.v1Compatible,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			defer opa.Stop(ctx)
+
+			if tc.expErr != "" {
+				l := logger.(*loggingtest.Logger)
+				if !test.Eventually(t, 5*time.Second, func() bool {
+					for _, e := range l.Entries() {
+						if strings.Contains(e.Message, tc.expErr) {
+							return true
+						}
+					}
+					return false
+				}) {
+					t.Fatalf("timed out waiting for logged error:\n\n%s\n\ngot\n\n%v:", tc.expErr, l.Entries())
+				}
+			} else {
+				exp := json.Number("7")
+
+				if result, err := opa.Decision(ctx, sdk.DecisionOptions{}); err != nil {
+					t.Fatal(err)
+				} else if result.Result != exp {
+					t.Fatalf("expected %v but got %v", exp, result.Result)
+				}
+			}
+		})
+	}
+}
+
+func TestRegoV1WithConfiguredLocalBundle(t *testing.T) {
+	tests := []struct {
+		note         string
+		v1Compatible bool
+		policy       string
+		expErr       string
+	}{
+		{
+			note: "0.x compatible, keywords not imported",
+			policy: `
+package system
+
+l contains 7
+
+main := v if {
+	v := l[0]
+}
+`,
+			expErr: "rego_parse_error",
+		},
+		{
+			note: "0.x compatible, keywords imported",
+			policy: `
+package system
+
+import future.keywords
+
+main := 7 if {
+	true
+}
+`,
+		},
+		{
+			note: "0.x compatible, rego.v1 imported",
+			policy: `
+package system
+
+import rego.v1
+
+main := 7 if {
+	true
+}
+`,
+		},
+		{
+			note:         "1.0 compatible, keywords not imported",
+			v1Compatible: true,
+			policy: `
+package system
+
+main := 7 if {
+	true
+}
+`,
+		},
+		{
+			note:         "1.0 compatible, keywords imported",
+			v1Compatible: true,
+			policy: `
+package system
+
+import future.keywords
+
+main := 7 if {
+	true
+}
+`,
+		},
+		{
+			note:         "1.0 compatible, rego.v1 imported",
+			v1Compatible: true,
+			policy: `
+package system
+
+import rego.v1
+
+main := 7 if {
+	true
+}
+`,
+		},
+		{
+			note:         "1.0 compatible, keywords not used",
+			v1Compatible: true,
+			policy: `
+package system
+
+main := 7 {
+	true
+}
+`,
+			expErr: "rego_parse_error",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.note, func(t *testing.T) {
+			test.WithTempFS(map[string]string{}, func(rootDir string) {
+				f, err := os.Create(filepath.Join(rootDir, "bundle.tar.gz"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				buf := archive.MustWriteTarGz([][2]string{{"main.rego", tc.policy}})
+				_, err = f.Write(buf.Bytes())
+				if err != nil {
+					t.Fatal(err)
+				}
+
+				c := fmt.Sprintf(`services:
+bundles:
+  test:
+    resource: "file://%s/bundle.tar.gz"`, rootDir)
+
+				var readyCh chan struct{}
+				logger := loggingtest.New()
+				logger.SetLevel(logging.Info)
+				if tc.expErr != "" {
+					readyCh = make(chan struct{})
+				}
+
+				ctx := context.Background()
+				opa, err := sdk.New(ctx, sdk.Options{
+					Logger:       logger,
+					Ready:        readyCh,
+					Config:       strings.NewReader(c),
+					RegoVersion:  ast.RegoV0,
+					V1Compatible: tc.v1Compatible,
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+
+				if tc.expErr != "" {
+					if !test.Eventually(t, 5*time.Second, func() bool {
+						entries := logger.Entries()
+						for _, e := range entries {
+							if strings.Contains(e.Message, tc.expErr) {
+								return true
+							}
+						}
+						return false
+					}) {
+						t.Fatalf("timed out waiting for logged error:\n\n%s\n\ngot\n\n%v:", tc.expErr, logger.Entries())
+					}
+				} else {
+					exp := json.Number("7")
+
+					if result, err := opa.Decision(ctx, sdk.DecisionOptions{}); err != nil {
+						t.Fatal(err)
+					} else if result.Result != exp {
+						t.Fatalf("expected %v but got %v", exp, result.Result)
+					}
+				}
+			})
+		})
+	}
 }
 
 func TestAsync(t *testing.T) {
@@ -2150,17 +2597,157 @@ result := {
 	}
 }
 
+func TestOpaRuntimeEnvironmentVariableDefinedInOS(t *testing.T) {
+	t.Setenv("TOKEN_VERIFY_KEY", "B41BD5F462719C6D6118E673A2389")
+
+	ctx := context.Background()
+
+	server := sdktest.MustNewServer(
+		sdktest.MockBundle("/bundles/bundle.tar.gz", map[string]string{
+			"main.rego": `
+package system
+import rego.v1
+
+rt := opa.runtime()
+
+grant if {
+	authenticatedUser
+}
+
+claims := payload if {
+	io.jwt.verify_hs256(input.token, opa.runtime().env.TOKEN_VERIFY_KEY)
+	[_, payload, _] := io.jwt.decode(input.token)
+}
+
+authenticatedUser := a if {
+	claims
+	a := count(claims) > 0
+}
+			`,
+		}),
+	)
+
+	defer server.Stop()
+
+	testBundleResource := "/bundles/bundle.tar.gz"
+
+	config := fmt.Sprintf(`{
+		"services": {
+			"test": {
+				"url": %q
+			}
+		},
+		"bundles": {
+			"test": {
+				"resource": %q
+			}
+		},
+	}`, server.URL(), testBundleResource)
+
+	opa, err := sdk.New(ctx, sdk.Options{
+		Config: strings.NewReader(config),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	defer opa.Stop(ctx)
+
+	exp := true
+
+	input := map[string]interface{}{}
+	input["token"] = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJuYW1lIjoiQWxpY2lhIFNtaXRoc29uaWFuIiwicm9sZXMiOlsicmVhZGVyIiwid3JpdGVyIl0sInVzZXJuYW1lIjoiYWxpY2UifQ.md2KPJFH9OgBq-N0RonGdf5doGYRO_1miN8ugTSeTYc"
+
+	if result, err := opa.Decision(ctx, sdk.DecisionOptions{Path: "/system/grant", Input: input}); err != nil {
+		t.Fatal(err)
+	} else if !reflect.DeepEqual(result.Result, exp) {
+		t.Fatalf("expected %v but got %v", exp, result.Result)
+	}
+}
+
+func TestOpaRuntimeEnvironmentVariableDefinedInConfig(t *testing.T) {
+	ctx := context.Background()
+
+	server := sdktest.MustNewServer(
+		sdktest.MockBundle("/bundles/bundle.tar.gz", map[string]string{
+			"main.rego": `
+package system
+import rego.v1
+
+rt := opa.runtime()
+
+grant if {
+	authenticatedUser
+}
+
+claims := payload if {
+	io.jwt.verify_hs256(input.token, opa.runtime().config.env.TOKEN_VERIFY_KEY)
+	[_, payload, _] := io.jwt.decode(input.token)
+}
+
+authenticatedUser := a if {
+	claims
+	a := count(claims) > 0
+}
+			`,
+		}),
+	)
+
+	defer server.Stop()
+
+	testBundleResource := "/bundles/bundle.tar.gz"
+
+	config := fmt.Sprintf(`{
+		"services": {
+			"test": {
+				"url": %q
+			}
+		},
+		"bundles": {
+			"test": {
+				"resource": %q
+			}
+		},
+		"env": {
+			"TOKEN_VERIFY_KEY" : "B41BD5F462719C6D6118E673A2389"
+		}
+	}`, server.URL(), testBundleResource)
+
+	opa, err := sdk.New(ctx, sdk.Options{
+		Config: strings.NewReader(config),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	defer opa.Stop(ctx)
+
+	exp := true
+
+	input := map[string]interface{}{}
+	input["token"] = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJuYW1lIjoiQWxpY2lhIFNtaXRoc29uaWFuIiwicm9sZXMiOlsicmVhZGVyIiwid3JpdGVyIl0sInVzZXJuYW1lIjoiYWxpY2UifQ.md2KPJFH9OgBq-N0RonGdf5doGYRO_1miN8ugTSeTYc"
+
+	if result, err := opa.Decision(ctx, sdk.DecisionOptions{Path: "/system/grant", Input: input}); err != nil {
+		t.Fatal(err)
+	} else if !reflect.DeepEqual(result.Result, exp) {
+		t.Fatalf("expected %v but got %v", exp, result.Result)
+	}
+}
+
 func TestPrintStatements(t *testing.T) {
 
 	ctx := context.Background()
 
-	s := sdktest.MustNewServer(sdktest.MockBundle("/bundles/b.tar.gz", map[string]string{
-		"x.rego": `
+	s := sdktest.MustNewServer(
+		sdktest.RawBundles(true), // non-raw bundles will be compiled server-side, which will change print location depending on parser rego-version (v1 drops rego.v1 import).
+		sdktest.MockBundle("/bundles/b.tar.gz", map[string]string{
+			"x.rego": `
 package foo
+import rego.v1
 
-p { print("XXX") }
+p if { print("XXX") }
 `,
-	}))
+		}))
 
 	defer s.Stop()
 
@@ -2201,7 +2788,125 @@ p { print("XXX") }
 
 	e := entries[len(entries)-1]
 
-	if e.Message != "XXX" || e.Fields["line"].(string) != "/x.rego:4" {
+	if e.Message != "XXX" || e.Fields["line"].(string) != "/x.rego:5" {
 		t.Fatal("expected print output but got:", e)
+	}
+}
+
+func TestConfigurableManagerOpts(t *testing.T) {
+	ctx := context.Background()
+
+	server := sdktest.MustNewServer(
+		sdktest.MockBundle("/bundles/bundle.tar.gz", map[string]string{
+			"main.rego": `
+package system
+
+main = true
+
+str = "foo"
+
+loopback = input
+`,
+		}),
+	)
+
+	defer server.Stop()
+
+	config := fmt.Sprintf(`{
+		"services": {
+			"test": {
+				"url": %q
+			}
+		},
+		"bundles": {
+			"test": {
+				"resource": "/bundles/bundle.tar.gz"
+			}
+		},
+		"status": {
+			"prometheus": true
+		}
+	}`, server.URL())
+
+	opa, err := sdk.New(ctx, sdk.Options{
+		ID:     "sdk-id-0",
+		Config: strings.NewReader(config),
+		ManagerOpts: []func(manager *plugins.Manager){
+			plugins.WithPrometheusRegister(prometheus.DefaultRegisterer),
+		},
+	})
+
+	defer opa.Stop(ctx)
+
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	m, err := prometheus.DefaultGatherer.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	registeredMetrics := toMetricMap(m)
+
+	if registeredMetrics["opa_info"] == false {
+		t.Errorf("expected metric 'opa_info' to be registered but it was not")
+	}
+}
+
+func toMetricMap(metrics []*promdto.MetricFamily) map[string]bool {
+	metricMap := make(map[string]bool, len(metrics))
+	for _, m := range metrics {
+		metricMap[m.GetName()] = true
+	}
+	return metricMap
+}
+
+func TestActivateV1Bundles(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond*100)
+	defer cancel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.FileServer(http.Dir("testdata")).ServeHTTP(w, r)
+	}))
+
+	config := fmt.Sprintf(`{
+		"services": {
+			"test": {
+				"url": %q
+			}
+		},
+		"bundles": {
+			"v1bundle": {
+				"resource": "/v1bundle.tar.gz"
+			}
+		}
+	}`, server.URL)
+
+	opa, err := sdk.New(ctx, sdk.Options{
+		ID:           "sdk-id-0",
+		Config:       strings.NewReader(config),
+		Logger:       logging.New(),
+		V1Compatible: true,
+	})
+
+	defer opa.Stop(ctx)
+
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	d, err := opa.Decision(context.Background(), sdk.DecisionOptions{
+		Path: "v1bundle/authz",
+		Input: map[string]interface{}{
+			"role": "admin",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if d.Result != true {
+		t.Errorf("expected result to be true, got %v", d.Result)
 	}
 }

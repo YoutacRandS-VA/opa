@@ -6,7 +6,6 @@ package server
 
 import (
 	"bytes"
-	"compress/gzip"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
@@ -25,6 +24,7 @@ import (
 	"sync"
 	"time"
 
+	serverDecodingPlugin "github.com/open-policy-agent/opa/plugins/server/decoding"
 	serverEncodingPlugin "github.com/open-policy-agent/opa/plugins/server/encoding"
 
 	"github.com/gorilla/mux"
@@ -111,39 +111,43 @@ type Server struct {
 	Handler           http.Handler
 	DiagnosticHandler http.Handler
 
-	router                 *mux.Router
-	addrs                  []string
-	diagAddrs              []string
-	h2cEnabled             bool
-	authentication         AuthenticationScheme
-	authorization          AuthorizationScheme
-	cert                   *tls.Certificate
-	certMtx                sync.RWMutex
-	certFile               string
-	certFileHash           []byte
-	certKeyFile            string
-	certKeyFileHash        []byte
-	certRefresh            time.Duration
-	certPool               *x509.CertPool
-	minTLSVersion          uint16
-	mtx                    sync.RWMutex
-	partials               map[string]rego.PartialResult
-	preparedEvalQueries    *cache
-	store                  storage.Store
-	manager                *plugins.Manager
-	decisionIDFactory      func() string
-	logger                 func(context.Context, *Info) error
-	errLimit               int
-	pprofEnabled           bool
-	runtime                *ast.Term
-	httpListeners          []httpListener
-	metrics                Metrics
-	defaultDecisionPath    string
-	interQueryBuiltinCache iCache.InterQueryCache
-	allPluginsOkOnce       bool
-	distributedTracingOpts tracing.Options
-	ndbCacheEnabled        bool
-	unixSocketPerm         *string
+	router                      *mux.Router
+	addrs                       []string
+	diagAddrs                   []string
+	h2cEnabled                  bool
+	authentication              AuthenticationScheme
+	authorization               AuthorizationScheme
+	cert                        *tls.Certificate
+	tlsConfigMtx                sync.RWMutex
+	certFile                    string
+	certFileHash                []byte
+	certKeyFile                 string
+	certKeyFileHash             []byte
+	certRefresh                 time.Duration
+	certPool                    *x509.CertPool
+	certPoolFile                string
+	certPoolFileHash            []byte
+	minTLSVersion               uint16
+	mtx                         sync.RWMutex
+	partials                    map[string]rego.PartialResult
+	preparedEvalQueries         *cache
+	store                       storage.Store
+	manager                     *plugins.Manager
+	decisionIDFactory           func() string
+	logger                      func(context.Context, *Info) error
+	errLimit                    int
+	pprofEnabled                bool
+	runtime                     *ast.Term
+	httpListeners               []httpListener
+	metrics                     Metrics
+	defaultDecisionPath         string
+	interQueryBuiltinCache      iCache.InterQueryCache
+	interQueryBuiltinValueCache iCache.InterQueryValueCache
+	allPluginsOkOnce            bool
+	distributedTracingOpts      tracing.Options
+	ndbCacheEnabled             bool
+	unixSocketPerm              *string
+	cipherSuites                *[]uint16
 }
 
 // Metrics defines the interface that the server requires for recording HTTP
@@ -151,6 +155,23 @@ type Server struct {
 type Metrics interface {
 	RegisterEndpoints(registrar func(path, method string, handler http.Handler))
 	InstrumentHandler(handler http.Handler, label string) http.Handler
+}
+
+// TLSConfig represents the TLS configuration for the server.
+// This configuration is used to configure file watchers to reload each file as it
+// changes on disk.
+type TLSConfig struct {
+	// CertFile is the path to the server's serving certificate file.
+	CertFile string
+
+	// KeyFile is the path to the server's key file, completing the key pair for the
+	// CertFile certificate.
+	KeyFile string
+
+	// CertPoolFile is the path to the CA cert pool file. The contents of this file will be
+	// reloaded when the file changes on disk and used in as trusted client CAs in the TLS config
+	// for new connections to the server.
+	CertPoolFile string
 }
 
 // Loop will contain all the calls from the server that we'll be listening on.
@@ -165,7 +186,7 @@ func New() *Server {
 // Init initializes the server. This function MUST be called before starting any loops
 // from s.Listeners().
 func (s *Server) Init(ctx context.Context) (*Server, error) {
-	s.initRouters()
+	s.initRouters(ctx)
 
 	txn, err := s.store.NewTransaction(ctx, storage.WriteParams)
 	if err != nil {
@@ -195,6 +216,11 @@ func (s *Server) Init(ctx context.Context) (*Server, error) {
 		return nil, err
 	}
 	s.DiagnosticHandler = s.initHandlerAuthn(s.DiagnosticHandler)
+
+	s.Handler, err = s.initHandlerDecodingLimits(s.Handler)
+	if err != nil {
+		return nil, err
+	}
 
 	return s, s.store.Commit(ctx, txn)
 }
@@ -271,6 +297,20 @@ func (s *Server) WithCertificatePaths(certFile, keyFile string, refresh time.Dur
 // WithCertPool sets the server-side cert pool that the server will use.
 func (s *Server) WithCertPool(pool *x509.CertPool) *Server {
 	s.certPool = pool
+	return s
+}
+
+// WithTLSConfig sets the TLS configuration used by the server.
+func (s *Server) WithTLSConfig(tlsConfig *TLSConfig) *Server {
+	s.certFile = tlsConfig.CertFile
+	s.certKeyFile = tlsConfig.KeyFile
+	s.certPoolFile = tlsConfig.CertPoolFile
+	return s
+}
+
+// WithCertRefresh sets the period on which certs, keys and cert pools are reloaded from disk.
+func (s *Server) WithCertRefresh(refresh time.Duration) *Server {
+	s.certRefresh = refresh
 	return s
 }
 
@@ -364,6 +404,12 @@ func (s *Server) WithDistributedTracingOpts(opts tracing.Options) *Server {
 // WithNDBCacheEnabled sets whether the ND builtins cache is to be used.
 func (s *Server) WithNDBCacheEnabled(ndbCacheEnabled bool) *Server {
 	s.ndbCacheEnabled = ndbCacheEnabled
+	return s
+}
+
+// WithCipherSuites sets the list of enabled TLS 1.0–1.2 cipher suites.
+func (s *Server) WithCipherSuites(cipherSuites *[]uint16) *Server {
+	s.cipherSuites = cipherSuites
 	return s
 }
 
@@ -566,11 +612,13 @@ func (s *Server) getListener(addr string, h http.Handler, t httpListenerType) ([
 			"cert-file":     s.certFile,
 			"cert-key-file": s.certKeyFile,
 		})
+
+		// if a manual cert refresh period has been set, then use the polling behavior,
+		// otherwise use the fsnotify default behavior
 		if s.certRefresh > 0 {
-			certLoop := s.certLoop(logger)
-			loops = []Loop{loop, certLoop}
-		} else {
-			loops = []Loop{loop}
+			loops = []Loop{loop, s.certLoopPolling(logger)}
+		} else if s.certFile != "" || s.certPoolFile != "" {
+			loops = []Loop{loop, s.certLoopNotify(logger)}
 		}
 	default:
 		err = fmt.Errorf("invalid url scheme %q", parsedURL.Scheme)
@@ -600,22 +648,42 @@ func (s *Server) getListenerForHTTPSServer(u *url.URL, h http.Handler, t httpLis
 		return nil, nil, fmt.Errorf("TLS certificate required but not supplied")
 	}
 
-	httpsServer := http.Server{
-		Addr:    u.Host,
-		Handler: h,
-		TLSConfig: &tls.Config{
-			GetCertificate: s.getCertificate,
-			ClientCAs:      s.certPool,
+	tlsConfig := tls.Config{
+		GetCertificate: s.getCertificate,
+		// GetConfigForClient is used to ensure that a fresh config is provided containing the latest cert pool.
+		// This is not required, but appears to be how connect time updates config should be done:
+		// https://github.com/golang/go/issues/16066#issuecomment-250606132
+		GetConfigForClient: func(_ *tls.ClientHelloInfo) (*tls.Config, error) {
+			s.tlsConfigMtx.Lock()
+			defer s.tlsConfigMtx.Unlock()
+
+			cfg := &tls.Config{
+				GetCertificate: s.getCertificate,
+				ClientCAs:      s.certPool,
+			}
+
+			if s.authentication == AuthenticationTLS {
+				cfg.ClientAuth = tls.RequireAndVerifyClientCert
+			}
+
+			if s.minTLSVersion != 0 {
+				cfg.MinVersion = s.minTLSVersion
+			} else {
+				cfg.MinVersion = defaultMinTLSVersion
+			}
+
+			if s.cipherSuites != nil {
+				cfg.CipherSuites = *s.cipherSuites
+			}
+
+			return cfg, nil
 		},
 	}
-	if s.authentication == AuthenticationTLS {
-		httpsServer.TLSConfig.ClientAuth = tls.RequireAndVerifyClientCert
-	}
 
-	if s.minTLSVersion != 0 {
-		httpsServer.TLSConfig.MinVersion = s.minTLSVersion
-	} else {
-		httpsServer.TLSConfig.MinVersion = defaultMinTLSVersion
+	httpsServer := http.Server{
+		Addr:      u.Host,
+		Handler:   h,
+		TLSConfig: &tlsConfig,
 	}
 
 	l := newHTTPListener(&httpsServer, t)
@@ -681,7 +749,8 @@ func (s *Server) initHandlerAuthz(handler http.Handler) http.Handler {
 			authorizer.Decision(s.manager.Config.DefaultAuthorizationDecisionRef),
 			authorizer.PrintHook(s.manager.PrintHook()),
 			authorizer.EnablePrintStatements(s.manager.EnablePrintStatements()),
-			authorizer.InterQueryCache(s.interQueryBuiltinCache))
+			authorizer.InterQueryCache(s.interQueryBuiltinCache),
+			authorizer.InterQueryValueCache(s.interQueryBuiltinValueCache))
 
 		if s.metrics != nil {
 			handler = s.instrumentHandler(handler.ServeHTTP, PromHandlerAPIAuthz)
@@ -689,6 +758,24 @@ func (s *Server) initHandlerAuthz(handler http.Handler) http.Handler {
 	}
 
 	return handler
+}
+
+// Enforces request body size limits on incoming requests. For gzipped requests,
+// it passes the size limit down the body-reading method via the request
+// context.
+func (s *Server) initHandlerDecodingLimits(handler http.Handler) (http.Handler, error) {
+	var decodingRawConfig json.RawMessage
+	serverConfig := s.manager.Config.Server
+	if serverConfig != nil {
+		decodingRawConfig = serverConfig.Decoding
+	}
+	decodingConfig, err := serverDecodingPlugin.NewConfigBuilder().WithBytes(decodingRawConfig).Parse()
+	if err != nil {
+		return nil, err
+	}
+	decodingHandler := handlers.DecodingLimitsHandler(handler, *decodingConfig.MaxLength, *decodingConfig.Gzip.MaxLength)
+
+	return decodingHandler, nil
 }
 
 func (s *Server) initHandlerCompression(handler http.Handler) (http.Handler, error) {
@@ -706,7 +793,7 @@ func (s *Server) initHandlerCompression(handler http.Handler) (http.Handler, err
 	return compressHandler, nil
 }
 
-func (s *Server) initRouters() {
+func (s *Server) initRouters(ctx context.Context) {
 	mainRouter := s.router
 	if mainRouter == nil {
 		mainRouter = mux.NewRouter()
@@ -715,7 +802,12 @@ func (s *Server) initRouters() {
 	diagRouter := mux.NewRouter()
 
 	// authorizer, if configured, needs the iCache to be set up already
-	s.interQueryBuiltinCache = iCache.NewInterQueryCache(s.manager.InterQueryBuiltinCacheConfig())
+
+	cacheConfig := s.manager.InterQueryBuiltinCacheConfig()
+
+	s.interQueryBuiltinCache = iCache.NewInterQueryCacheWithContext(ctx, cacheConfig)
+	s.interQueryBuiltinValueCache = iCache.NewInterQueryValueCache(ctx, cacheConfig)
+
 	s.manager.RegisterCacheTrigger(s.updateCacheConfig)
 
 	// Add authorization handler. This must come BEFORE authentication handler
@@ -822,22 +914,13 @@ func (s *Server) instrumentHandler(handler func(http.ResponseWriter, *http.Reque
 	return httpHandler
 }
 
-func (s *Server) execQuery(ctx context.Context, br bundleRevisions, txn storage.Transaction, parsedQuery ast.Body, input ast.Value, m metrics.Metrics, explainMode types.ExplainModeV1, includeMetrics, includeInstrumentation, pretty bool) (*types.QueryResponseV1, error) {
+func (s *Server) execQuery(ctx context.Context, br bundleRevisions, txn storage.Transaction, parsedQuery ast.Body, input ast.Value, rawInput *interface{}, m metrics.Metrics, explainMode types.ExplainModeV1, includeMetrics, includeInstrumentation, pretty bool) (*types.QueryResponseV1, error) {
 	results := types.QueryResponseV1{}
 	logger := s.getDecisionLogger(br)
 
 	var buf *topdown.BufferTracer
 	if explainMode != types.ExplainOffV1 {
 		buf = topdown.NewBufferTracer()
-	}
-
-	var rawInput *interface{}
-	if input != nil {
-		x, err := ast.JSON(input)
-		if err != nil {
-			return nil, err
-		}
-		rawInput = &x
 	}
 
 	var ndbCache builtins.NDBCache
@@ -857,6 +940,7 @@ func (s *Server) execQuery(ctx context.Context, br bundleRevisions, txn storage.
 		rego.Runtime(s.runtime),
 		rego.UnsafeBuiltins(unsafeBuiltinsMap),
 		rego.InterQueryBuiltinCache(s.interQueryBuiltinCache),
+		rego.InterQueryBuiltinValueCache(s.interQueryBuiltinValueCache),
 		rego.PrintHook(s.manager.PrintHook()),
 		rego.EnablePrintStatements(s.manager.EnablePrintStatements()),
 		rego.DistributedTracingOpts(s.distributedTracingOpts),
@@ -975,20 +1059,10 @@ func (s *Server) v0QueryPath(w http.ResponseWriter, r *http.Request, urlPath str
 	ctx := logging.WithDecisionID(r.Context(), decisionID)
 	annotateSpan(ctx, decisionID)
 
-	input, err := readInputV0(r)
+	input, goInput, err := readInputV0(r)
 	if err != nil {
 		writer.ErrorString(w, http.StatusBadRequest, types.CodeInvalidParameter, fmt.Errorf("unexpected parse error for input: %w", err))
 		return
-	}
-
-	var goInput *interface{}
-	if input != nil {
-		x, err := ast.JSON(input)
-		if err != nil {
-			writer.ErrorString(w, http.StatusInternalServerError, types.CodeInvalidParameter, fmt.Errorf("could not marshal input: %w", err))
-			return
-		}
-		goInput = &x
 	}
 
 	// Prepare for query.
@@ -1007,7 +1081,7 @@ func (s *Server) v0QueryPath(w http.ResponseWriter, r *http.Request, urlPath str
 	}
 
 	if useDefaultDecisionPath {
-		urlPath = s.defaultDecisionPath
+		urlPath = s.generateDefaultDecisionPath()
 	}
 
 	logger := s.getDecisionLogger(br)
@@ -1055,6 +1129,7 @@ func (s *Server) v0QueryPath(w http.ResponseWriter, r *http.Request, urlPath str
 		rego.EvalParsedInput(input),
 		rego.EvalMetrics(m),
 		rego.EvalInterQueryBuiltinCache(s.interQueryBuiltinCache),
+		rego.EvalInterQueryBuiltinValueCache(s.interQueryBuiltinValueCache),
 		rego.EvalNDBuiltinCache(ndbCache),
 	}
 
@@ -1294,7 +1369,7 @@ func (s *Server) v1CompilePost(w http.ResponseWriter, r *http.Request) {
 	m.Timer(metrics.RegoQueryParse).Start()
 
 	// decompress the input if sent as zip
-	body, err := readPlainBody(r)
+	body, err := util.ReadMaybeCompressedBody(r)
 	if err != nil {
 		writer.Error(w, http.StatusBadRequest, types.NewErrorV1(types.CodeInvalidParameter, "could not decompress the body"))
 		return
@@ -1336,6 +1411,7 @@ func (s *Server) v1CompilePost(w http.ResponseWriter, r *http.Request) {
 		rego.Runtime(s.runtime),
 		rego.UnsafeBuiltins(unsafeBuiltinsMap),
 		rego.InterQueryBuiltinCache(s.interQueryBuiltinCache),
+		rego.InterQueryBuiltinValueCache(s.interQueryBuiltinValueCache),
 		rego.PrintHook(s.manager.PrintHook()),
 	)
 
@@ -1393,24 +1469,15 @@ func (s *Server) v1DataGet(w http.ResponseWriter, r *http.Request) {
 	inputs := r.URL.Query()[types.ParamInputV1]
 
 	var input ast.Value
+	var goInput *interface{}
 
 	if len(inputs) > 0 {
 		var err error
-		input, err = readInputGetV1(inputs[len(inputs)-1])
+		input, goInput, err = readInputGetV1(inputs[len(inputs)-1])
 		if err != nil {
 			writer.ErrorString(w, http.StatusBadRequest, types.CodeInvalidParameter, err)
 			return
 		}
-	}
-
-	var goInput *interface{}
-	if input != nil {
-		x, err := ast.JSON(input)
-		if err != nil {
-			writer.ErrorString(w, http.StatusInternalServerError, types.CodeInvalidParameter, fmt.Errorf("could not marshal input: %w", err))
-			return
-		}
-		goInput = &x
 	}
 
 	m.Timer(metrics.RegoInputParse).Stop()
@@ -1484,6 +1551,7 @@ func (s *Server) v1DataGet(w http.ResponseWriter, r *http.Request) {
 		rego.EvalMetrics(m),
 		rego.EvalQueryTracer(buf),
 		rego.EvalInterQueryBuiltinCache(s.interQueryBuiltinCache),
+		rego.EvalInterQueryBuiltinValueCache(s.interQueryBuiltinValueCache),
 		rego.EvalInstrument(includeInstrumentation),
 		rego.EvalNDBuiltinCache(ndbCache),
 	}
@@ -1625,20 +1693,10 @@ func (s *Server) v1DataPost(w http.ResponseWriter, r *http.Request) {
 
 	m.Timer(metrics.RegoInputParse).Start()
 
-	input, err := readInputPostV1(r)
+	input, goInput, err := readInputPostV1(r)
 	if err != nil {
 		writer.ErrorString(w, http.StatusBadRequest, types.CodeInvalidParameter, err)
 		return
-	}
-
-	var goInput *interface{}
-	if input != nil {
-		x, err := ast.JSON(input)
-		if err != nil {
-			writer.ErrorString(w, http.StatusInternalServerError, types.CodeInvalidParameter, fmt.Errorf("could not marshal input: %w", err))
-			return
-		}
-		goInput = &x
 	}
 
 	m.Timer(metrics.RegoInputParse).Stop()
@@ -1713,6 +1771,7 @@ func (s *Server) v1DataPost(w http.ResponseWriter, r *http.Request) {
 		rego.EvalMetrics(m),
 		rego.EvalQueryTracer(buf),
 		rego.EvalInterQueryBuiltinCache(s.interQueryBuiltinCache),
+		rego.EvalInterQueryBuiltinValueCache(s.interQueryBuiltinValueCache),
 		rego.EvalInstrument(includeInstrumentation),
 		rego.EvalNDBuiltinCache(ndbCache),
 	}
@@ -2215,7 +2274,7 @@ func (s *Server) v1QueryGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	pretty := pretty(r)
-	results, err := s.execQuery(ctx, br, txn, parsedQuery, nil, m, explainMode, includeMetrics(r), includeInstrumentation, pretty)
+	results, err := s.execQuery(ctx, br, txn, parsedQuery, nil, nil, m, explainMode, includeMetrics(r), includeInstrumentation, pretty)
 	if err != nil {
 		switch err := err.(type) {
 		case ast.Errors:
@@ -2285,7 +2344,7 @@ func (s *Server) v1QueryPost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	results, err := s.execQuery(ctx, br, txn, parsedQuery, input, m, explainMode, includeMetrics, includeInstrumentation, pretty)
+	results, err := s.execQuery(ctx, br, txn, parsedQuery, input, request.Input, m, explainMode, includeMetrics, includeInstrumentation, pretty)
 	if err != nil {
 		switch err := err.(type) {
 		case ast.Errors:
@@ -2479,7 +2538,7 @@ func (s *Server) getCompiler() *ast.Compiler {
 	return s.manager.GetCompiler()
 }
 
-func (s *Server) makeRego(ctx context.Context,
+func (s *Server) makeRego(_ context.Context,
 	strictBuiltinErrors bool,
 	txn storage.Transaction,
 	input ast.Value,
@@ -2608,6 +2667,7 @@ func isPathOwned(path, root []string) bool {
 
 func (s *Server) updateCacheConfig(cacheConfig *iCache.Config) {
 	s.interQueryBuiltinCache.UpdateConfig(cacheConfig)
+	s.interQueryBuiltinValueCache.UpdateConfig(cacheConfig)
 }
 
 func (s *Server) updateNDCache(enabled bool) {
@@ -2690,6 +2750,8 @@ func getExplain(p []string, zero types.ExplainModeV1) types.ExplainModeV1 {
 		switch x {
 		case string(types.ExplainNotesV1):
 			return types.ExplainNotesV1
+		case string(types.ExplainFailsV1):
+			return types.ExplainFailsV1
 		case string(types.ExplainFullV1):
 			return types.ExplainFullV1
 		case string(types.ExplainDebugV1):
@@ -2699,94 +2761,91 @@ func getExplain(p []string, zero types.ExplainModeV1) types.ExplainModeV1 {
 	return zero
 }
 
-func readInputV0(r *http.Request) (ast.Value, error) {
+func readInputV0(r *http.Request) (ast.Value, *interface{}, error) {
 
 	parsed, ok := authorizer.GetBodyOnContext(r.Context())
 	if ok {
-		return ast.InterfaceToValue(parsed)
+		v, err := ast.InterfaceToValue(parsed)
+		return v, &parsed, err
 	}
 
 	// decompress the input if sent as zip
-	body, err := readPlainBody(r)
+	bodyBytes, err := util.ReadMaybeCompressedBody(r)
 	if err != nil {
-		return nil, fmt.Errorf("could not decompress the body: %w", err)
+		return nil, nil, fmt.Errorf("could not decompress the body: %w", err)
 	}
 
 	var x interface{}
 
 	if strings.Contains(r.Header.Get("Content-Type"), "yaml") {
-		bs, err := io.ReadAll(body)
-		if err != nil {
-			return nil, err
-		}
-		if len(bs) > 0 {
-			if err = util.Unmarshal(bs, &x); err != nil {
-				return nil, fmt.Errorf("body contains malformed input document: %w", err)
+		if len(bodyBytes) > 0 {
+			if err = util.Unmarshal(bodyBytes, &x); err != nil {
+				return nil, nil, fmt.Errorf("body contains malformed input document: %w", err)
 			}
 		}
 	} else {
-		dec := util.NewJSONDecoder(body)
+		dec := util.NewJSONDecoder(bytes.NewBuffer(bodyBytes))
 		if err := dec.Decode(&x); err != nil && err != io.EOF {
-			return nil, fmt.Errorf("body contains malformed input document: %w", err)
+			return nil, nil, fmt.Errorf("body contains malformed input document: %w", err)
 		}
 	}
 
-	return ast.InterfaceToValue(x)
+	v, err := ast.InterfaceToValue(x)
+	return v, &x, err
 }
 
-func readInputGetV1(str string) (ast.Value, error) {
+func readInputGetV1(str string) (ast.Value, *interface{}, error) {
 	var input interface{}
 	if err := util.UnmarshalJSON([]byte(str), &input); err != nil {
-		return nil, fmt.Errorf("parameter contains malformed input document: %w", err)
+		return nil, nil, fmt.Errorf("parameter contains malformed input document: %w", err)
 	}
-	return ast.InterfaceToValue(input)
+	v, err := ast.InterfaceToValue(input)
+	return v, &input, err
 }
 
-func readInputPostV1(r *http.Request) (ast.Value, error) {
+func readInputPostV1(r *http.Request) (ast.Value, *interface{}, error) {
 
 	parsed, ok := authorizer.GetBodyOnContext(r.Context())
 	if ok {
 		if obj, ok := parsed.(map[string]interface{}); ok {
 			if input, ok := obj["input"]; ok {
-				return ast.InterfaceToValue(input)
+				v, err := ast.InterfaceToValue(input)
+				return v, &input, err
 			}
 		}
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	var request types.DataRequestV1
 
 	// decompress the input if sent as zip
-	body, err := readPlainBody(r)
+	bodyBytes, err := util.ReadMaybeCompressedBody(r)
 	if err != nil {
-		return nil, fmt.Errorf("could not decompress the body: %w", err)
+		return nil, nil, fmt.Errorf("could not decompress the body: %w", err)
 	}
 
 	ct := r.Header.Get("Content-Type")
 	// There is no standard for yaml mime-type so we just look for
 	// anything related
 	if strings.Contains(ct, "yaml") {
-		bs, err := io.ReadAll(body)
-		if err != nil {
-			return nil, err
-		}
-		if len(bs) > 0 {
-			if err = util.Unmarshal(bs, &request); err != nil {
-				return nil, fmt.Errorf("body contains malformed input document: %w", err)
+		if len(bodyBytes) > 0 {
+			if err = util.Unmarshal(bodyBytes, &request); err != nil {
+				return nil, nil, fmt.Errorf("body contains malformed input document: %w", err)
 			}
 		}
 	} else {
-		dec := util.NewJSONDecoder(body)
+		dec := util.NewJSONDecoder(bytes.NewBuffer(bodyBytes))
 		if err := dec.Decode(&request); err != nil && err != io.EOF {
-			return nil, fmt.Errorf("body contains malformed input document: %w", err)
+			return nil, nil, fmt.Errorf("body contains malformed input document: %w", err)
 		}
 	}
 
 	if request.Input == nil {
-		return nil, nil
+		return nil, nil, nil
 	}
 
-	return ast.InterfaceToValue(*request.Input)
+	v, err := ast.InterfaceToValue(*request.Input)
+	return v, request.Input, err
 }
 
 type compileRequest struct {
@@ -2800,11 +2859,10 @@ type compileRequestOptions struct {
 	DisableInlining []string
 }
 
-func readInputCompilePostV1(r io.ReadCloser) (*compileRequest, *types.ErrorV1) {
-
+func readInputCompilePostV1(reqBytes []byte) (*compileRequest, *types.ErrorV1) {
 	var request types.CompileRequestV1
 
-	err := util.NewJSONDecoder(r).Decode(&request)
+	err := util.NewJSONDecoder(bytes.NewBuffer(reqBytes)).Decode(&request)
 	if err != nil {
 		return nil, types.NewErrorV1(types.CodeInvalidParameter, "error(s) occurred while decoding request: %v", err.Error())
 	}
@@ -2928,21 +2986,29 @@ func (l decisionLogger) Log(ctx context.Context, txn storage.Transaction, path s
 	}
 	decisionID, _ := logging.DecisionIDFromContext(ctx)
 
+	var httpRctx logging.HTTPRequestContext
+
+	httpRctxVal, _ := logging.HTTPRequestContextFromContext(ctx)
+	if httpRctxVal != nil {
+		httpRctx = *httpRctxVal
+	}
+
 	info := &Info{
-		Txn:        txn,
-		Revision:   l.revision,
-		Bundles:    bundles,
-		Timestamp:  time.Now().UTC(),
-		DecisionID: decisionID,
-		RemoteAddr: rctx.ClientAddr,
-		Path:       path,
-		Query:      query,
-		Input:      goInput,
-		InputAST:   astInput,
-		Results:    goResults,
-		Error:      err,
-		Metrics:    m,
-		RequestID:  rctx.ReqID,
+		Txn:                txn,
+		Revision:           l.revision,
+		Bundles:            bundles,
+		Timestamp:          time.Now().UTC(),
+		DecisionID:         decisionID,
+		RemoteAddr:         rctx.ClientAddr,
+		HTTPRequestContext: httpRctx,
+		Path:               path,
+		Query:              query,
+		Input:              goInput,
+		InputAST:           astInput,
+		Results:            goResults,
+		Error:              err,
+		Metrics:            m,
+		RequestID:          rctx.ReqID,
 	}
 
 	if ndbCache != nil {
@@ -2991,22 +3057,6 @@ func annotateSpan(ctx context.Context, decisionID string) {
 	}
 	trace.SpanFromContext(ctx).
 		SetAttributes(attribute.String(otelDecisionIDAttr, decisionID))
-}
-
-func readPlainBody(r *http.Request) (io.ReadCloser, error) {
-	if strings.Contains(r.Header.Get("Content-Encoding"), "gzip") {
-		gzReader, err := gzip.NewReader(r.Body)
-		if err != nil {
-			return nil, err
-		}
-		bytesBody, err := io.ReadAll(gzReader)
-		if err != nil {
-			return nil, err
-		}
-		defer gzReader.Close()
-		return io.NopCloser(bytes.NewReader(bytesBody)), err
-	}
-	return r.Body, nil
 }
 
 func pretty(r *http.Request) bool {

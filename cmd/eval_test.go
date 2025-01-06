@@ -19,6 +19,7 @@ import (
 	"testing"
 
 	"github.com/open-policy-agent/opa/ast"
+	"github.com/open-policy-agent/opa/internal/file/archive"
 	"github.com/open-policy-agent/opa/internal/presentation"
 	"github.com/open-policy-agent/opa/loader"
 	"github.com/open-policy-agent/opa/rego"
@@ -111,17 +112,17 @@ q {
 			t.Fatalf("expected message '%v', got '%v'", expectedMessage, msg)
 		}
 
-		loc1, ok1 := output.Errors[0].Location.(map[string]interface{})
-		if !ok1 {
-			t.Fatal("unexpected location type")
+		loc1 := output.Errors[0].Location
+		if loc1 == nil {
+			t.Fatal("unexpected nil location")
 		}
 
-		loc2, ok2 := output.Errors[1].Location.(map[string]interface{})
-		if !ok2 {
-			t.Fatal("unexpected location type")
+		loc2 := output.Errors[1].Location
+		if loc2 == nil {
+			t.Fatal("unexpected nil location")
 		}
 
-		if loc1["row"] == loc2["row"] {
+		if loc1.Row == loc2.Row {
 			t.Fatal("expected 2 distinct error occurrences in policy")
 		}
 	})
@@ -514,7 +515,7 @@ package test
 # METADATA
 # schemas:
 #   - input: schema["input"]
-p { 	
+p {
 	rego.metadata.rule() # presence of rego.metadata.* calls must not trigger unwanted schema evaluation
 	input.foo == 42 # type mismatch with schema that should be ignored
 }`
@@ -530,7 +531,7 @@ package test
 # schemas:
 #   - input.foo: {"type": "boolean"}
 p {
-	rego.metadata.rule() # presence of rego.metadata.* calls must not trigger unwanted schema evaluation	 
+	rego.metadata.rule() # presence of rego.metadata.* calls must not trigger unwanted schema evaluation
 	input.foo == 42 # type mismatch with schema that should NOT be ignored since it is an inlined schema format
 }`
 
@@ -1210,6 +1211,463 @@ func TestEvalDebugTraceJSONOutput(t *testing.T) {
 	}
 }
 
+func TestEvalPrettyTrace(t *testing.T) {
+	tests := []struct {
+		note        string
+		query       string
+		includeVars bool
+		files       map[string]string
+		expected    string
+	}{
+		{
+			note:        "simple without vars",
+			query:       "data.test.p",
+			includeVars: false,
+			files: map[string]string{
+				"test.rego": `package test
+import rego.v1
+
+p if {
+	x := 1
+	y := 2
+	z := 3
+	x == z - y
+} 
+`,
+			},
+			expected: `%SKIP_LINE%
+query:1 %.*%         Enter data.test.p = _
+query:1 %.*%         | Eval data.test.p = _
+query:1 %.*%         | Index data.test.p (matched 1 rule, early exit)
+%.*%/test.rego:4     | Enter data.test.p
+%.*%/test.rego:5     | | Eval x = 1
+%.*%/test.rego:6     | | Eval y = 2
+%.*%/test.rego:7     | | Eval z = 3
+%.*%/test.rego:8     | | Eval minus(z, y, __local3__)
+%.*%/test.rego:8     | | Eval x = __local3__
+%.*%/test.rego:4     | | Exit data.test.p early
+query:1 %.*%         | Exit data.test.p = _
+query:1 %.*%         Redo data.test.p = _
+query:1 %.*%         | Redo data.test.p = _
+%.*%/test.rego:4     | Redo data.test.p
+%.*%/test.rego:8     | | Redo x = __local3__
+%.*%/test.rego:8     | | Redo minus(z, y, __local3__)
+%.*%/test.rego:7     | | Redo z = 3
+%.*%/test.rego:6     | | Redo y = 2
+%.*%/test.rego:5     | | Redo x = 1
+true
+`,
+		},
+		{
+			note:        "simple with vars",
+			query:       "data.test.p",
+			includeVars: true,
+			files: map[string]string{
+				"test.rego": `package test
+import rego.v1
+
+p if {
+	x := 1
+	y := 2
+	z := 3
+	x == z - y
+} 
+`,
+			},
+			expected: `%SKIP_LINE%
+query:1 %.*%         Enter data.test.p = _                                {}
+query:1 %.*%         | Eval data.test.p = _                               {}
+query:1 %.*%         | Index data.test.p (matched 1 rule, early exit)     {}
+%.*%/test.rego:4     | Enter data.test.p                                  {}
+%.*%/test.rego:5     | | Eval x = 1                                       {}
+%.*%/test.rego:6     | | Eval y = 2                                       {}
+%.*%/test.rego:7     | | Eval z = 3                                       {}
+%.*%/test.rego:8     | | Eval minus(z, y, __local3__)                     {y: 2, z: 3}
+%.*%/test.rego:8     | | Eval x = __local3__                              {__local3__: 1, x: 1}
+%.*%/test.rego:4     | | Exit data.test.p early                           {}
+query:1 %.*%         | Exit data.test.p = _                               {_: true, data.test.p: true}
+query:1 %.*%         Redo data.test.p = _                                 {_: true, data.test.p: true}
+query:1 %.*%         | Redo data.test.p = _                               {_: true, data.test.p: true}
+%.*%/test.rego:4     | Redo data.test.p                                   {}
+%.*%/test.rego:8     | | Redo x = __local3__                              {__local3__: 1, x: 1}
+%.*%/test.rego:8     | | Redo minus(z, y, __local3__)                     {__local3__: 1, y: 2, z: 3}
+%.*%/test.rego:7     | | Redo z = 3                                       {z: 3}
+%.*%/test.rego:6     | | Redo y = 2                                       {y: 2}
+%.*%/test.rego:5     | | Redo x = 1                                       {x: 1}
+true
+`,
+		},
+		{
+			note:        "large var",
+			query:       "data.test.p",
+			includeVars: true,
+			files: map[string]string{
+				"test.rego": `package test
+import rego.v1
+
+v := {
+		"foo": ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j"],
+		"bar": ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j"],
+		"baz": ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j"],
+		"qux": ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j"],
+	}
+
+p if {
+	x := v
+
+	x.foo[_] == "a"
+} 
+`,
+			},
+			expected: `%SKIP_LINE%
+query:1 %.*%          Enter data.test.p = _                                  {}
+query:1 %.*%          | Eval data.test.p = _                                 {}
+query:1 %.*%          | Index data.test.p (matched 1 rule, early exit)       {}
+%.*%/test.rego:11     | Enter data.test.p                                    {}
+%.*%/test.rego:12     | | Eval x = data.test.v                               {}
+%.*%/test.rego:12     | | Index data.test.v (matched 1 rule, early exit)     {}
+%.*%/test.rego:4      | | Enter data.test.v                                  {}
+%.*%/test.rego:4      | | | Eval true                                        {}
+%.*%/test.rego:4      | | | Exit data.test.v early                           {}
+%.*%/test.rego:14     | | Eval x.foo[_] = "a"                                {x: {"bar": ["a", "b", "c", "d", ...}
+%.*%/test.rego:11     | | Exit data.test.p early                             {}
+query:1 %.*%          | Exit data.test.p = _                                 {_: true, data.test.p: true}
+query:1 %.*%          Redo data.test.p = _                                   {_: true, data.test.p: true}
+query:1 %.*%          | Redo data.test.p = _                                 {_: true, data.test.p: true}
+%.*%/test.rego:11     | Redo data.test.p                                     {}
+%.*%/test.rego:14     | | Redo x.foo[_] = "a"                                {_: 0, x: {"bar": ["a", "b", "c", "d", ...}
+%.*%/test.rego:12     | | Redo x = data.test.v                               {data.test.v: {"bar": ["a", "b", "c", "d", ..., x: {"bar": ["a", "b", "c", "d", ...}
+%.*%/test.rego:4      | | | Redo true                                        {}
+true
+`,
+		},
+		{
+			note:        "func call",
+			query:       "data.test.p",
+			includeVars: true,
+			files: map[string]string{
+				"test.rego": `package test
+import rego.v1
+
+p if {
+	x := 1
+	y := 2
+	z := 3
+	z == f(x, y)
+}
+
+f(a, b) := c if {
+	c := a + b
+}
+`,
+			},
+			expected: `%SKIP_LINE%
+query:1 %.*%          Enter data.test.p = _                                {}
+query:1 %.*%          | Eval data.test.p = _                               {}
+query:1 %.*%          | Index data.test.p (matched 1 rule, early exit)     {}
+%.*%/test.rego:4      | Enter data.test.p                                  {}
+%.*%/test.rego:5      | | Eval x = 1                                       {}
+%.*%/test.rego:6      | | Eval y = 2                                       {}
+%.*%/test.rego:7      | | Eval z = 3                                       {}
+%.*%/test.rego:8      | | Eval data.test.f(x, y, __local6__)               {x: 1, y: 2}
+%.*%/test.rego:8      | | Index data.test.f (matched 1 rule)               {x: 1, y: 2}
+%.*%/test.rego:11     | | Enter data.test.f                                {}
+%.*%/test.rego:12     | | | Eval plus(a, b, __local7__)                    {a: 1, b: 2}
+%.*%/test.rego:12     | | | Eval c = __local7__                            {__local7__: 3}
+%.*%/test.rego:11     | | | Exit data.test.f                               {a: 1, b: 2, c: 3}
+%.*%/test.rego:8      | | Eval z = __local6__                              {__local6__: 3, z: 3}
+%.*%/test.rego:4      | | Exit data.test.p early                           {}
+query:1 %.*%          | Exit data.test.p = _                               {_: true, data.test.p: true}
+query:1 %.*%          Redo data.test.p = _                                 {_: true, data.test.p: true}
+query:1 %.*%          | Redo data.test.p = _                               {_: true, data.test.p: true}
+%.*%/test.rego:4      | Redo data.test.p                                   {}
+%.*%/test.rego:8      | | Redo z = __local6__                              {__local6__: 3, z: 3}
+%.*%/test.rego:8      | | Redo data.test.f(x, y, __local6__)               {__local6__: 3, x: 1, y: 2}
+%.*%/test.rego:12     | | | Redo c = __local7__                            {__local7__: 3, c: 3}
+%.*%/test.rego:12     | | | Redo plus(a, b, __local7__)                    {__local7__: 3, a: 1, b: 2}
+%.*%/test.rego:7      | | Redo z = 3                                       {z: 3}
+%.*%/test.rego:6      | | Redo y = 2                                       {y: 2}
+%.*%/test.rego:5      | | Redo x = 1                                       {x: 1}
+true
+`,
+		},
+		{
+			note:        "every",
+			query:       "data.test.p",
+			includeVars: true,
+			files: map[string]string{
+				"test.rego": `package test
+import rego.v1
+
+p if {
+	l := ["a", "b", "c"]
+	every x in l {
+		count(x) == 1
+	}
+}
+
+f(a, b) := c if {
+	c := a + b
+}
+`,
+			},
+			expected: `%SKIP_LINE%
+query:1 %.*%         Enter data.test.p = _                                                         {}
+query:1 %.*%         | Eval data.test.p = _                                                        {}
+query:1 %.*%         | Index data.test.p (matched 1 rule, early exit)                              {}
+%.*%/test.rego:4     | Enter data.test.p                                                           {}
+%.*%/test.rego:5     | | Eval l = ["a", "b", "c"]                                                  {}
+%.*%/test.rego:6     | | Eval __local6__ = l                                                       {l: ["a", "b", "c"]}
+%.*%/test.rego:6     | | Eval every x in __local6__ { count(x, __local7__); __local7__ = 1 }       {__local6__: ["a", "b", "c"]}
+%.*%/test.rego:6     | | Enter every x in __local6__ { count(x, __local7__); __local7__ = 1 }      {__local6__: ["a", "b", "c"]}
+%.*%/test.rego:6     | | | Eval __local6__[__local1__] = x                                         {__local6__: ["a", "b", "c"]}
+%.*%/test.rego:7     | | | Enter count(x, __local7__); __local7__ = 1                              {x: "a"}
+%.*%/test.rego:7     | | | | Eval count(x, __local7__)                                             {x: "a"}
+%.*%/test.rego:7     | | | | Eval __local7__ = 1                                                   {__local7__: 1}
+%.*%/test.rego:7     | | | | Exit count(x, __local7__); __local7__ = 1 early                       {__local7__: 1, x: "a"}
+%.*%/test.rego:7     | | | Redo count(x, __local7__); __local7__ = 1                               {__local7__: 1, x: "a"}
+%.*%/test.rego:7     | | | | Redo __local7__ = 1                                                   {__local7__: 1}
+%.*%/test.rego:7     | | | | Redo count(x, __local7__)                                             {__local7__: 1, x: "a"}
+%.*%/test.rego:6     | | | Redo every x in __local6__ { count(x, __local7__); __local7__ = 1 }     {__local1__: 0, __local6__: ["a", "b", "c"], x: "a"}
+%.*%/test.rego:6     | | | Redo __local6__[__local1__] = x                                         {__local1__: 0, __local6__: ["a", "b", "c"], x: "a"}
+%.*%/test.rego:7     | | | Enter count(x, __local7__); __local7__ = 1                              {x: "b"}
+%.*%/test.rego:7     | | | | Eval count(x, __local7__)                                             {x: "b"}
+%.*%/test.rego:7     | | | | Eval __local7__ = 1                                                   {__local7__: 1}
+%.*%/test.rego:7     | | | | Exit count(x, __local7__); __local7__ = 1 early                       {__local7__: 1, x: "b"}
+%.*%/test.rego:7     | | | Redo count(x, __local7__); __local7__ = 1                               {__local7__: 1, x: "b"}
+%.*%/test.rego:7     | | | | Redo __local7__ = 1                                                   {__local7__: 1}
+%.*%/test.rego:7     | | | | Redo count(x, __local7__)                                             {__local7__: 1, x: "b"}
+%.*%/test.rego:6     | | | Redo every x in __local6__ { count(x, __local7__); __local7__ = 1 }     {__local1__: 1, __local6__: ["a", "b", "c"], x: "b"}
+%.*%/test.rego:6     | | | Redo __local6__[__local1__] = x                                         {__local1__: 1, __local6__: ["a", "b", "c"], x: "b"}
+%.*%/test.rego:7     | | | Enter count(x, __local7__); __local7__ = 1                              {x: "c"}
+%.*%/test.rego:7     | | | | Eval count(x, __local7__)                                             {x: "c"}
+%.*%/test.rego:7     | | | | Eval __local7__ = 1                                                   {__local7__: 1}
+%.*%/test.rego:7     | | | | Exit count(x, __local7__); __local7__ = 1 early                       {__local7__: 1, x: "c"}
+%.*%/test.rego:7     | | | Redo count(x, __local7__); __local7__ = 1                               {__local7__: 1, x: "c"}
+%.*%/test.rego:7     | | | | Redo __local7__ = 1                                                   {__local7__: 1}
+%.*%/test.rego:7     | | | | Redo count(x, __local7__)                                             {__local7__: 1, x: "c"}
+%.*%/test.rego:6     | | | Redo every x in __local6__ { count(x, __local7__); __local7__ = 1 }     {__local1__: 2, __local6__: ["a", "b", "c"], x: "c"}
+%.*%/test.rego:6     | | | Redo __local6__[__local1__] = x                                         {__local1__: 2, __local6__: ["a", "b", "c"], x: "c"}
+%.*%/test.rego:4     | | Exit data.test.p early                                                    {}
+query:1 %.*%         | Exit data.test.p = _                                                        {_: true, data.test.p: true}
+query:1 %.*%         Redo data.test.p = _                                                          {_: true, data.test.p: true}
+query:1 %.*%         | Redo data.test.p = _                                                        {_: true, data.test.p: true}
+%.*%/test.rego:4     | Redo data.test.p                                                            {}
+%.*%/test.rego:6     | | Redo every x in __local6__ { count(x, __local7__); __local7__ = 1 }       {__local6__: ["a", "b", "c"]}
+%.*%/test.rego:6     | | | Exit every x in __local6__ { count(x, __local7__); __local7__ = 1 }     {__local6__: ["a", "b", "c"]}
+%.*%/test.rego:6     | | Redo __local6__ = l                                                       {__local6__: ["a", "b", "c"], l: ["a", "b", "c"]}
+%.*%/test.rego:5     | | Redo l = ["a", "b", "c"]                                                  {l: ["a", "b", "c"]}
+true
+`,
+		},
+		{
+			note:        "rule value",
+			query:       "data.test.p",
+			includeVars: true,
+			files: map[string]string{
+				"test.rego": `package test
+import rego.v1
+
+a := 1
+
+p if {
+	a + 1 == 2
+	a + 2 == 3
+}
+`,
+			},
+			expected: `%SKIP_LINE%
+query:1 %.*%         Enter data.test.p = _                                  {}
+query:1 %.*%         | Eval data.test.p = _                                 {}
+query:1 %.*%         | Index data.test.p (matched 1 rule, early exit)       {}
+%.*%/test.rego:6     | Enter data.test.p                                    {}
+%.*%/test.rego:7     | | Eval __local2__ = data.test.a                      {}
+%.*%/test.rego:7     | | Index data.test.a (matched 1 rule, early exit)     {}
+%.*%/test.rego:4     | | Enter data.test.a                                  {}
+%.*%/test.rego:4     | | | Eval true                                        {}
+%.*%/test.rego:4     | | | Exit data.test.a early                           {}
+%.*%/test.rego:7     | | Eval plus(__local2__, 1, __local0__)               {__local2__: 1}
+%.*%/test.rego:7     | | Eval __local0__ = 2                                {__local0__: 2}
+%.*%/test.rego:8     | | Eval __local3__ = data.test.a                      {data.test.a: 1}
+%.*%/test.rego:8     | | Index data.test.a (matched 1 rule, early exit)     {data.test.a: 1}
+%.*%/test.rego:8     | | Eval plus(__local3__, 2, __local1__)               {__local3__: 1}
+%.*%/test.rego:8     | | Eval __local1__ = 3                                {__local1__: 3}
+%.*%/test.rego:6     | | Exit data.test.p early                             {}
+query:1 %.*%         | Exit data.test.p = _                                 {_: true, data.test.p: true}
+query:1 %.*%         Redo data.test.p = _                                   {_: true, data.test.p: true}
+query:1 %.*%         | Redo data.test.p = _                                 {_: true, data.test.p: true}
+%.*%/test.rego:6     | Redo data.test.p                                     {}
+%.*%/test.rego:8     | | Redo __local1__ = 3                                {__local1__: 3}
+%.*%/test.rego:8     | | Redo plus(__local3__, 2, __local1__)               {__local1__: 3, __local3__: 1}
+%.*%/test.rego:8     | | Redo __local3__ = data.test.a                      {__local3__: 1, data.test.a: 1}
+%.*%/test.rego:7     | | Redo __local0__ = 2                                {__local0__: 2}
+%.*%/test.rego:7     | | Redo plus(__local2__, 1, __local0__)               {__local0__: 2, __local2__: 1}
+%.*%/test.rego:7     | | Redo __local2__ = data.test.a                      {__local2__: 1, data.test.a: 1}
+%.*%/test.rego:4     | | | Redo true                                        {}
+true
+`,
+		},
+		{
+			note:        "input values",
+			query:       "data.test.p",
+			includeVars: true,
+			files: map[string]string{
+				"test.rego": `package test
+import rego.v1
+
+p if {
+	input.x == 1
+	input.x + input.y == input.z
+}
+`,
+				"input.json": `{
+	"x": 1,
+	"y": 2,
+	"z": 3
+}`,
+			},
+			expected: `%SKIP_LINE%
+query:1 %.*%         Enter data.test.p = _                                 {}
+query:1 %.*%         | Eval data.test.p = _                                {}
+query:1 %.*%         | Index data.test.p (matched 1 rule, early exit)      {}
+%.*%/test.rego:4     | Enter data.test.p                                   {}
+%.*%/test.rego:5     | | Eval input.x = 1                                  {}
+%.*%/test.rego:6     | | Eval __local1__ = input.x                         {}
+%.*%/test.rego:6     | | Eval __local2__ = input.y                         {}
+%.*%/test.rego:6     | | Eval plus(__local1__, __local2__, __local0__)     {__local1__: 1, __local2__: 2}
+%.*%/test.rego:6     | | Eval __local0__ = input.z                         {__local0__: 3}
+%.*%/test.rego:4     | | Exit data.test.p early                            {}
+query:1 %.*%         | Exit data.test.p = _                                {_: true, data.test.p: true}
+query:1 %.*%         Redo data.test.p = _                                  {_: true, data.test.p: true}
+query:1 %.*%         | Redo data.test.p = _                                {_: true, data.test.p: true}
+%.*%/test.rego:4     | Redo data.test.p                                    {}
+%.*%/test.rego:6     | | Redo __local0__ = input.z                         {__local0__: 3}
+%.*%/test.rego:6     | | Redo plus(__local1__, __local2__, __local0__)     {__local0__: 3, __local1__: 1, __local2__: 2}
+%.*%/test.rego:6     | | Redo __local2__ = input.y                         {__local2__: 2}
+%.*%/test.rego:6     | | Redo __local1__ = input.x                         {__local1__: 1}
+%.*%/test.rego:5     | | Redo input.x = 1                                  {}
+true
+`,
+		},
+		{
+			note:        "data values",
+			query:       "data.test.p",
+			includeVars: true,
+			files: map[string]string{
+				"test.rego": `package test
+import rego.v1
+
+p if {
+	data.x == 1
+	data.x + data.y == data.z
+}
+`,
+				"data.json": `{
+	"x": 1,
+	"y": 2,
+	"z": 3
+}`,
+			},
+			expected: `%SKIP_LINE%
+query:1 %.*%         Enter data.test.p = _                                 {}
+query:1 %.*%         | Eval data.test.p = _                                {}
+query:1 %.*%         | Index data.test.p (matched 1 rule, early exit)      {}
+%.*%/test.rego:4     | Enter data.test.p                                   {}
+%.*%/test.rego:5     | | Eval data.x = 1                                   {}
+%.*%/test.rego:6     | | Eval __local1__ = data.x                          {}
+%.*%/test.rego:6     | | Eval __local2__ = data.y                          {}
+%.*%/test.rego:6     | | Eval plus(__local1__, __local2__, __local0__)     {__local1__: 1, __local2__: 2}
+%.*%/test.rego:6     | | Eval __local0__ = data.z                          {__local0__: 3}
+%.*%/test.rego:4     | | Exit data.test.p early                            {}
+query:1 %.*%         | Exit data.test.p = _                                {_: true, data.test.p: true}
+query:1 %.*%         Redo data.test.p = _                                  {_: true, data.test.p: true}
+query:1 %.*%         | Redo data.test.p = _                                {_: true, data.test.p: true}
+%.*%/test.rego:4     | Redo data.test.p                                    {}
+%.*%/test.rego:6     | | Redo __local0__ = data.z                          {__local0__: 3}
+%.*%/test.rego:6     | | Redo plus(__local1__, __local2__, __local0__)     {__local0__: 3, __local1__: 1, __local2__: 2}
+%.*%/test.rego:6     | | Redo __local2__ = data.y                          {__local2__: 2}
+%.*%/test.rego:6     | | Redo __local1__ = data.x                          {__local1__: 1}
+%.*%/test.rego:5     | | Redo data.x = 1                                   {}
+true
+`,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.note, func(t *testing.T) {
+			var buf bytes.Buffer
+
+			test.WithTempFS(tc.files, func(path string) {
+				params := newEvalCommandParams()
+				_ = params.bundlePaths.Set(path)
+				inputFile := filepath.Join(path, "input.json")
+				if _, err := os.Stat(inputFile); err == nil {
+					params.inputPath = inputFile
+				}
+				_ = params.outputFormat.Set(evalPrettyOutput)
+				_ = params.explain.Set(explainModeFull)
+				params.traceVarValues = tc.includeVars
+				params.disableIndexing = true
+				_ = params.bundlePaths.Set(path)
+
+				_, err := eval([]string{tc.query}, params, &buf)
+				if err != nil {
+					t.Fatalf("Unexpected error: %s\n\n%s", err, buf.String())
+				}
+			})
+
+			actual := buf.String()
+			if !stringsMatch(t, tc.expected, actual) {
+				t.Fatalf("Expected:\n\n%v\n\nGot:\n\n%v", tc.expected, actual)
+			}
+		})
+	}
+}
+
+func stringsMatch(t *testing.T, expected, actual string) bool {
+	t.Helper()
+
+	var expectedLines []string
+	for _, l := range strings.Split(expected, "\n") {
+		if !strings.Contains(l, "%SKIP_LINE%") {
+			expectedLines = append(expectedLines, l)
+		}
+	}
+
+	actualLines := strings.Split(actual, "\n")
+
+	if len(expectedLines) != len(actualLines) {
+		t.Errorf("Expected %d lines but got %d", len(expectedLines), len(actualLines))
+		return false
+	}
+
+	for i, expectedLine := range expectedLines {
+		actualLine := actualLines[i]
+
+		expectedParts := strings.Split(expectedLine, "%.*%")
+		if len(expectedParts) == 1 {
+			if expectedLine != actualLine {
+				t.Errorf("Mismatch on line %d. Expected:\n\n%s\n\nGot:\n\n%s", i, expectedLine, actualLine)
+				return false
+			}
+		} else if len(expectedParts) == 2 {
+			if !strings.HasPrefix(actualLine, expectedParts[0]) {
+				t.Errorf("Expected line %d to start with:\n\n%s\n\nbut got:\n\n%s", i, expectedParts[0], actualLine)
+				return false
+			}
+			if !strings.HasSuffix(actualLine, expectedParts[1]) {
+				t.Errorf("Expected line %d to end with:\n\n%s\n\nbut got:\n\n%s", i, expectedParts[1], actualLine)
+				return false
+			}
+		} else {
+			t.Fatalf("At most one .* is allowed per line but found %d on line %d:\n\n%s", len(expectedParts)-1, i, expectedLine)
+			return false
+		}
+	}
+
+	return true
+}
+
 func TestResetExprLocations(t *testing.T) {
 
 	// Make sure no panic if passed nil.
@@ -1308,6 +1766,143 @@ time.clock(input.y, time.clock(input.x))
 			if actual := buf.String(); actual != tc.expected {
 				t.Errorf("expected output %q\ngot %q", tc.expected, actual)
 			}
+		})
+	}
+}
+
+func TestEvalPartialRegoVersionOutput(t *testing.T) {
+	tests := []struct {
+		note                string
+		regoV1ImportCapable bool
+		v1Compatible        bool
+		query               string
+		module              string
+		expected            string
+	}{
+		{
+			note:                "v0, no future keywords",
+			regoV1ImportCapable: true,
+			query:               "data.test.p",
+			module: `package test
+
+p[v] {
+	v := input.v
+}
+`,
+			expected: `# Query 1
+data.partial.test.p = _term_0_0
+_term_0_0
+
+# Module 1
+package partial.test
+
+import rego.v1
+
+p contains __local0__1 if __local0__1 = input.v
+`,
+		},
+		{
+			note:                "v0, no future keywords, not rego.v1 import capable",
+			regoV1ImportCapable: false,
+			query:               "data.test.p",
+			module: `package test
+
+p[v] {
+	v := input.v
+}
+`,
+			expected: `# Query 1
+data.partial.test.p = _term_0_0
+_term_0_0
+
+# Module 1
+package partial.test
+
+p[__local0__1] {
+	__local0__1 = input.v
+}
+`,
+		},
+		{
+			note:                "v0, future keywords",
+			regoV1ImportCapable: true,
+			query:               "data.test.p",
+			module: `package test
+
+import rego.v1
+
+p contains v if {
+	v := input.v
+}
+`,
+			expected: `# Query 1
+data.partial.test.p = _term_0_0
+_term_0_0
+
+# Module 1
+package partial.test
+
+import rego.v1
+
+p contains __local0__1 if __local0__1 = input.v
+`,
+		},
+		{
+			note:                "v1",
+			regoV1ImportCapable: true,
+			v1Compatible:        true,
+			query:               "data.test.p",
+			module: `package test
+
+p contains v if {
+	v := input.v
+}
+`,
+			expected: `# Query 1
+data.partial.test.p = _term_0_0
+_term_0_0
+
+# Module 1
+package partial.test
+
+p contains __local0__1 if __local0__1 = input.v
+`,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.note, func(t *testing.T) {
+			files := map[string]string{
+				"test.rego": tc.module,
+			}
+
+			test.WithTempFS(files, func(path string) {
+				params := newEvalCommandParams()
+				_ = params.dataPaths.Set(filepath.Join(path, "test.rego"))
+				params.partial = true
+				params.shallowInlining = true
+				params.v1Compatible = tc.v1Compatible
+				_ = params.outputFormat.Set(evalSourceOutput)
+
+				if !tc.regoV1ImportCapable {
+					caps := newcapabilitiesFlag()
+					caps.C = ast.CapabilitiesForThisVersion()
+					caps.C.Features = []string{
+						ast.FeatureRefHeadStringPrefixes,
+						ast.FeatureRefHeads,
+					}
+					params.capabilities = caps
+				}
+
+				buf := new(bytes.Buffer)
+				_, err := eval([]string{tc.query}, params, buf)
+				if err != nil {
+					t.Fatal("unexpected error:", err)
+				}
+				if actual := buf.String(); actual != tc.expected {
+					t.Errorf("expected output %q\ngot %q", tc.expected, actual)
+				}
+			})
 		})
 	}
 }
@@ -1432,9 +2027,9 @@ func TestPolicyWithStrictFlag(t *testing.T) {
 	}{
 		{
 			note: "strict mode should error on duplicate imports",
-			policy: `package x 
-			import future.keywords.if 
-			import future.keywords.if 
+			policy: `package x
+			import future.keywords.if
+			import future.keywords.if
 			foo = 2`,
 			query:           "data.foo",
 			expectedCode:    "rego_compile_error",
@@ -1444,7 +2039,7 @@ func TestPolicyWithStrictFlag(t *testing.T) {
 			note: "strict mode should error on unused imports",
 			policy: `package x
 			import future.keywords.if
-			import data.foo 
+			import data.foo
 			foo = 2`,
 			query:           "data.foo",
 			expectedCode:    "rego_compile_error",
@@ -1501,15 +2096,15 @@ func TestPolicyWithStrictFlag(t *testing.T) {
 	}{
 		{
 			note: "This should not error as it is valid",
-			policy: `package x 
+			policy: `package x
 			import future.keywords.if
 			foo = 2`,
 			query: "data.foo",
 		},
 		{
 			note: "Strict mode should not validate the query, only the policy, this should not error",
-			policy: `package x 
-			import future.keywords.if 
+			policy: `package x
+			import future.keywords.if
 			foo = 2`,
 			query: "x := data.x.foo",
 		},
@@ -1521,7 +2116,7 @@ func TestPolicyWithStrictFlag(t *testing.T) {
 				"test.rego": tc.policy,
 			}
 
-			test.WithTempFS(files, func(path string) {
+			test.WithTempFS(files, func(_ string) {
 				params := newEvalCommandParams()
 				params.strict = true
 
@@ -1546,9 +2141,9 @@ func TestBundleWithStrictFlag(t *testing.T) {
 	}{
 		{
 			note: "strict mode should error on duplicate imports in this bundle",
-			policy: `package x 
-			import future.keywords.if 
-			import future.keywords.if 
+			policy: `package x
+			import future.keywords.if
+			import future.keywords.if
 			foo = 2`,
 			query:           "data.foo",
 			expectedCode:    "rego_compile_error",
@@ -1557,8 +2152,8 @@ func TestBundleWithStrictFlag(t *testing.T) {
 		{
 			note: "strict mode should error on unused imports in this bundle",
 			policy: `package x
-			import future.keywords.if 
-			import data.foo 
+			import future.keywords.if
+			import data.foo
 			foo = 2`,
 			query:           "data.foo",
 			expectedCode:    "rego_compile_error",
@@ -1567,7 +2162,7 @@ func TestBundleWithStrictFlag(t *testing.T) {
 		{
 			note: "strict mode should error when reserved vars data or input is used in this bundle",
 			policy: `package x
-			import future.keywords.if 
+			import future.keywords.if
 			data if { x = 1}`,
 			query:           "data.foo",
 			expectedCode:    "rego_compile_error",
@@ -1616,15 +2211,15 @@ func TestBundleWithStrictFlag(t *testing.T) {
 	}{
 		{
 			note: "This bundle should not error as it is valid",
-			policy: `package x 
-			import future.keywords.if 
+			policy: `package x
+			import future.keywords.if
 			foo = 2`,
 			query: "data.foo",
 		},
 		{
 			note: "Strict mode should not validate the query, only the policy, this bundle should not error",
-			policy: `package x 
-			import future.keywords.if 
+			policy: `package x
+			import future.keywords.if
 			foo = 2`,
 			query: "x := data.x.foo",
 		},
@@ -1817,7 +2412,7 @@ func TestUnexpectedElseIfElseErr(t *testing.T) {
 			else := x if {
 				x=2
 				1==2
-			} else 
+			} else
 				x=3
 			`,
 	}
@@ -1840,7 +2435,7 @@ func TestUnexpectedElseIfElseErr(t *testing.T) {
 
 		// Check the error message
 		errorMessage := err.Error()
-		expectedErrorMessage := "rego_parse_error: unexpected ident token: expected else value term or rule body"
+		expectedErrorMessage := "rego_parse_error: unexpected identifier token: expected else value term or rule body"
 		if !strings.Contains(errorMessage, expectedErrorMessage) {
 			t.Fatalf("expected error message to contain '%s', but got '%s'", expectedErrorMessage, errorMessage)
 		}
@@ -1879,4 +2474,497 @@ func TestUnexpectedElseIfErr(t *testing.T) {
 			t.Fatalf("expected error message to contain '%s', but got '%s'", expectedErrorMessage, errorMessage)
 		}
 	})
+}
+
+func TestEvalPolicyWithV1CompatibleFlag(t *testing.T) {
+	tests := []struct {
+		note         string
+		v1Compatible bool
+		modules      map[string]string
+		query        string
+		expectedErr  string
+	}{
+		{
+			note: "default compatibility: policy with no rego.v1 or future.keywords imports",
+			modules: map[string]string{
+				"test.rego": `package test
+				allow if {
+					1 < 2
+				}`,
+			},
+			query:       "data.test.allow",
+			expectedErr: "rego_parse_error",
+		},
+		{
+			note:         "1.0 compatibility: policy with no rego.v1 or future.keywords imports",
+			v1Compatible: true,
+			modules: map[string]string{
+				"test.rego": `package test
+				allow if {
+					1 < 2
+				}`,
+			},
+			query: "data.test.allow",
+		},
+		{
+			note:         "1.0 compatibility: policy with rego.v1 import",
+			v1Compatible: true,
+			modules: map[string]string{
+				"test.rego": `package test
+				import rego.v1
+				allow if {
+					1 < 2
+				}`,
+			},
+			query: "data.test.allow",
+		},
+		{
+			note:         "1.0 compatibility: policy with future.keywords import",
+			v1Compatible: true,
+			modules: map[string]string{
+				"test.rego": `package test
+				import future.keywords.if
+				allow if {
+					1 < 2
+				}`,
+			},
+			query: "data.test.allow",
+		},
+	}
+
+	setup := []struct {
+		name          string
+		commandParams func(params *evalCommandParams, path string)
+	}{
+		{
+			name: "Files",
+			commandParams: func(params *evalCommandParams, path string) {
+				params.dataPaths = newrepeatedStringFlag([]string{path})
+			},
+		},
+		{
+			name: "Bundle",
+			commandParams: func(params *evalCommandParams, path string) {
+				if err := params.bundlePaths.Set(path); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+	}
+
+	for _, s := range setup {
+		for _, tc := range tests {
+			t.Run(fmt.Sprintf("%s: %s", s.name, tc.note), func(t *testing.T) {
+				test.WithTempFS(tc.modules, func(path string) {
+					params := newEvalCommandParams()
+					s.commandParams(&params, path)
+					params.v1Compatible = tc.v1Compatible
+
+					var buf bytes.Buffer
+
+					defined, err := eval([]string{tc.query}, params, &buf)
+
+					if tc.expectedErr == "" {
+						if err != nil {
+							t.Fatalf("Unexpected error: %v, buf: %s", err, buf.String())
+						} else if !defined {
+							t.Fatal("expected result to be defined")
+						}
+					} else {
+						if err == nil {
+							t.Fatal("expected error, got none")
+						}
+
+						actual := buf.String()
+						if !strings.Contains(actual, tc.expectedErr) {
+							t.Fatalf("expected error:\n\n%v\n\ngot\n\n%v", tc.expectedErr, actual)
+						}
+					}
+				})
+			})
+		}
+	}
+}
+
+func TestEvalPolicyWithBundleRegoVersion(t *testing.T) {
+	tests := []struct {
+		note        string
+		files       map[string]string
+		query       string
+		expectedErr string
+	}{
+		{
+			note: "v0.x bundle, no rego.v1 or future.keywords imports",
+			files: map[string]string{
+				".manifest": `{"rego_version": 0}`,
+				"policy.rego": `package test
+allow if {
+	1 < 2
+}`,
+			},
+			query:       "data.test.allow",
+			expectedErr: "rego_parse_error",
+		},
+		{
+			note: "v0 bundle, v1 per-file override",
+			files: map[string]string{
+				".manifest": `{
+	"rego_version": 0,
+	"file_rego_versions": {
+		"/policy2.rego": 1
+	}
+}`,
+				"policy1.rego": `package test
+p[1] {
+	1 < 2
+}
+`,
+				"policy2.rego": `package test
+p contains 2 if {
+	1 < 2
+}
+`,
+			},
+			query: "data.test.p",
+		},
+		{
+			note: "v0 bundle, v1 per-file override (glob)",
+			files: map[string]string{
+				".manifest": `{
+	"rego_version": 0,
+	"file_rego_versions": {
+		"/bar/*.rego": 1
+	}
+}`,
+				"foo/policy1.rego": `package test
+p[1] {
+	1 < 2
+}
+`,
+				"bar/policy1.rego": `package test
+p contains 2 if {
+	1 < 2
+}
+`,
+				"bar/policy2.rego": `package test
+p contains 3 if {
+	1 < 2
+}
+`,
+			},
+			query: "data.test.p",
+		},
+		{
+			note: "v0 bundle, v1 per-file override, incompliant",
+			files: map[string]string{
+				".manifest": `{
+	"rego_version": 0,
+	"file_rego_versions": {
+		"/policy2.rego": 1
+	}
+}`,
+				"policy1.rego": `package test
+p[1] {
+	1 < 2
+}
+`,
+				"policy2.rego": `package test
+p[2] {
+	1 < 2
+}
+`,
+			},
+			query:       "data.test.p",
+			expectedErr: "rego_parse_error",
+		},
+
+		{
+			note: "v1.0 bundle, no rego.v1 or future.keywords imports",
+			files: map[string]string{
+				".manifest": `{"rego_version": 1}`,
+				"policy.rego": `package test
+allow if {
+	1 < 2
+}`,
+			},
+			query: "data.test.allow",
+		},
+		{
+			note: "v1.0 bundle, policy with rego.v1 import",
+			files: map[string]string{
+				".manifest": `{"rego_version": 1}`,
+				"policy.rego": `package test
+import rego.v1
+allow if {
+	1 < 2
+}`,
+			},
+			query: "data.test.allow",
+		},
+		{
+			note: "v1.0 bundle, future.keywords import",
+			files: map[string]string{
+				".manifest": `{"rego_version": 1}`,
+				"policy.rego": `package test
+import future.keywords.if
+allow if {
+	1 < 2
+}`,
+			},
+			query: "data.test.allow",
+		},
+		{
+			note: "v1.0 bundle, keywords not used",
+			files: map[string]string{
+				".manifest": `{"rego_version": 1}`,
+				"policy.rego": `package test
+allow {
+	1 < 2
+}`,
+			},
+			query:       "data.test.allow",
+			expectedErr: "rego_parse_error",
+		},
+		{
+			note: "v1 bundle, v0 per-file override",
+			files: map[string]string{
+				".manifest": `{
+	"rego_version": 1,
+	"file_rego_versions": {
+		"/policy1.rego": 0
+	}
+}`,
+				"policy1.rego": `package test
+p[1] {
+	1 < 2
+}
+`,
+				"policy2.rego": `package test
+p contains 2 if {
+	1 < 2
+}
+`,
+			},
+			query: "data.test.p",
+		},
+		{
+			note: "v1 bundle, v0 per-file override (glob)",
+			files: map[string]string{
+				".manifest": `{
+	"rego_version": 1,
+	"file_rego_versions": {
+		"/foo/*.rego": 0
+	}
+}`,
+				"foo/policy1.rego": `package test
+p[1] {
+	1 < 2
+}
+`,
+				"foo/policy2.rego": `package test
+p[2] {
+	1 < 2
+}
+`,
+				"bar/policy1.rego": `package test
+p contains 3 if {
+	1 < 2
+}
+`,
+			},
+			query: "data.test.p",
+		},
+		{
+			note: "v1 bundle, v0 per-file override, incompliant",
+			files: map[string]string{
+				".manifest": `{
+	"rego_version": 1,
+	"file_rego_versions": {
+		"*/policy2.rego": 0
+	}
+}`,
+				"policy1.rego": `package test
+p contains 1 if {
+	input.x == 1
+}
+`,
+				"policy2.rego": `package test
+p contains 2 if {
+	input.x == 1
+}
+`,
+			},
+			query:       "data.test.p",
+			expectedErr: "rego_parse_error",
+		},
+	}
+
+	bundleTypeCases := []struct {
+		note string
+		tar  bool
+	}{
+		{
+			"bundle dir", false,
+		},
+		{
+			"bundle tar", true,
+		},
+	}
+
+	v1CompatibleFlagCases := []struct {
+		note string
+		used bool
+	}{
+		{
+			"no --v1-compatible", false,
+		},
+		{
+			"--v1-compatible", true,
+		},
+	}
+
+	for _, bundleType := range bundleTypeCases {
+		for _, v1CompatibleFlag := range v1CompatibleFlagCases {
+			for _, tc := range tests {
+				t.Run(fmt.Sprintf("%s, %s, %s", bundleType.note, v1CompatibleFlag.note, tc.note), func(t *testing.T) {
+					files := map[string]string{}
+
+					if bundleType.tar {
+						files["bundle.tar.gz"] = ""
+					} else {
+						for k, v := range tc.files {
+							files[k] = v
+						}
+					}
+
+					test.WithTempFS(files, func(root string) {
+						p := root
+						if bundleType.tar {
+							p = filepath.Join(root, "bundle.tar.gz")
+							files := make([][2]string, 0, len(tc.files))
+							for k, v := range tc.files {
+								files = append(files, [2]string{k, v})
+							}
+							buf := archive.MustWriteTarGz(files)
+							bf, err := os.Create(p)
+							if err != nil {
+								t.Fatalf("Unexpected error: %v", err)
+							}
+							_, err = bf.Write(buf.Bytes())
+							if err != nil {
+								t.Fatalf("Unexpected error: %v", err)
+							}
+						}
+
+						params := newEvalCommandParams()
+						params.v1Compatible = v1CompatibleFlag.used
+						if err := params.bundlePaths.Set(p); err != nil {
+							t.Fatal(err)
+						}
+
+						var buf bytes.Buffer
+
+						defined, err := eval([]string{tc.query}, params, &buf)
+
+						if tc.expectedErr == "" {
+							if err != nil {
+								t.Fatalf("Unexpected error: %v, buf: %s", err, buf.String())
+							} else if !defined {
+								t.Fatal("expected result to be defined")
+							}
+						} else {
+							if err == nil {
+								t.Fatal("expected error, got none")
+							}
+
+							actual := buf.String()
+							if !strings.Contains(actual, tc.expectedErr) {
+								t.Fatalf("expected error:\n\n%v\n\ngot\n\n%v", tc.expectedErr, actual)
+							}
+						}
+					})
+				})
+			}
+		}
+	}
+}
+
+func TestWithQueryImports(t *testing.T) {
+	tests := []struct {
+		note    string
+		query   string
+		imports []string
+		exp     string
+		expErrs []string
+	}{
+		{
+			note:  "no imports, none required",
+			query: "1 + 2",
+			exp:   "3\n",
+		},
+		{
+			note:    "future keyword used, future.keywords imported",
+			query:   `"b" in ["a", "b", "c"]`,
+			imports: []string{"future.keywords.in"},
+			exp:     "true\n",
+		},
+		{
+			note:    "future keyword used, rego.v1 imported",
+			query:   `"b" in ["a", "b", "c"]`,
+			imports: []string{"rego.v1"},
+			exp:     "true\n",
+		},
+		{
+			note:    "future keyword used, invalid rego.v2 imported",
+			query:   `"b" in ["a", "b", "c"]`,
+			imports: []string{"rego.v2"},
+			expErrs: []string{
+				"1:8: rego_parse_error: invalid import `rego.v2`, must be `rego.v1`",
+			},
+		},
+		{
+			note:  "future keyword used, no imports",
+			query: `"b" in ["a", "b", "c"]`,
+			expErrs: []string{
+				"1:5: rego_unsafe_var_error: var in is unsafe (hint: `import future.keywords.in` to import a future keyword)",
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.note, func(t *testing.T) {
+			params := newEvalCommandParams()
+			_ = params.outputFormat.Set(evalPrettyOutput)
+			params.imports = newrepeatedStringFlag(tc.imports)
+
+			var buf bytes.Buffer
+
+			defined, err := eval([]string{tc.query}, params, &buf)
+
+			if len(tc.expErrs) == 0 {
+				if err != nil {
+					t.Fatalf("Unexpected error: %v, buf: %s", err, buf.String())
+				}
+
+				if !defined {
+					t.Fatal("expected result to be defined")
+				}
+
+				if buf.String() != tc.exp {
+					t.Fatalf("expected:\n\n%s\n\ngot:\n\n%s", tc.exp, buf.String())
+				}
+			} else {
+				if err == nil {
+					t.Fatal("expected error, got none")
+				}
+
+				actual := buf.String()
+				for _, expErr := range tc.expErrs {
+					if !strings.Contains(actual, expErr) {
+						t.Fatalf("expected error:\n\n%v\n\ngot\n\n%v", expErr, actual)
+					}
+				}
+			}
+		})
+	}
 }
