@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/open-policy-agent/opa/ast"
+	"github.com/open-policy-agent/opa/logging"
 	"github.com/open-policy-agent/opa/logging/test"
 	"github.com/open-policy-agent/opa/metrics"
 	"github.com/open-policy-agent/opa/plugins"
@@ -151,6 +152,117 @@ func TestPluginCustomBackendAndHTTPServiceAndConsole(t *testing.T) {
 	// check console logger
 	if exp, act := 2, len(testLogger.Entries()); exp != act {
 		t.Fatalf("Console: expected %d events, got %d", exp, act)
+	}
+}
+
+func TestPluginRequestContext(t *testing.T) {
+	ctx := context.Background()
+	manager, _ := plugins.New(nil, "test-instance-id", inmem.New())
+
+	backend := &testPlugin{}
+	manager.Register("test_plugin", backend)
+
+	h1 := http.Header{}
+	h1.Set("foo", "bar")
+
+	h2 := http.Header{}
+	h2.Set("foo", "bar")
+	h2.Add("foo2", "bar")
+	h2.Add("foo2", "bar2")
+
+	cases := []struct {
+		note         string
+		config       []byte
+		decisionInfo *server.Info
+		expected     *RequestContext
+	}{
+		{
+			note:         "no request context config - no request context in decision info",
+			config:       []byte(`{"plugin": "test_plugin"}`),
+			decisionInfo: &server.Info{Bundles: map[string]server.BundleInfo{"b1": {Revision: "A"}}},
+			expected:     nil,
+		},
+		{
+			note:         "request context in config (single header) - no request context in decision info",
+			config:       []byte(`{"plugin": "test_plugin", "request_context": {"http": {"headers": ["foo"]}}}`),
+			decisionInfo: &server.Info{Bundles: map[string]server.BundleInfo{"b1": {Revision: "A"}}},
+			expected:     nil,
+		},
+		{
+			note:         "request context in config (single header) - request context in decision info (no header map)",
+			config:       []byte(`{"plugin": "test_plugin", "request_context": {"http": {"headers": ["foo"]}}}`),
+			decisionInfo: &server.Info{Bundles: map[string]server.BundleInfo{"b1": {Revision: "A"}}, HTTPRequestContext: logging.HTTPRequestContext{Header: nil}},
+			expected:     nil,
+		},
+		{
+			note:         "request context in config (single header) - request context in decision info (with header map)",
+			config:       []byte(`{"plugin": "test_plugin", "request_context": {"http": {"headers": ["foo"]}}}`),
+			decisionInfo: &server.Info{Bundles: map[string]server.BundleInfo{"b1": {Revision: "A"}}, HTTPRequestContext: logging.HTTPRequestContext{Header: h1}},
+			expected:     &RequestContext{HTTPRequest: &HTTPRequestContext{Headers: map[string][]string{"foo": []string{"bar"}}}},
+		},
+		{
+			note:         "request context in config (multiple headers) - request context in decision info (with header map partial)",
+			config:       []byte(`{"plugin": "test_plugin", "request_context": {"http": {"headers": ["foo", "foo2"]}}}`),
+			decisionInfo: &server.Info{Bundles: map[string]server.BundleInfo{"b1": {Revision: "A"}}, HTTPRequestContext: logging.HTTPRequestContext{Header: h1}},
+			expected:     &RequestContext{HTTPRequest: &HTTPRequestContext{Headers: map[string][]string{"foo": []string{"bar"}}}},
+		},
+		{
+			note:         "request context in config (multiple headers) - request context in decision info (with header map full)",
+			config:       []byte(`{"plugin": "test_plugin", "request_context": {"http": {"headers": ["foo", "foo2"]}}}`),
+			decisionInfo: &server.Info{Bundles: map[string]server.BundleInfo{"b1": {Revision: "A"}}, HTTPRequestContext: logging.HTTPRequestContext{Header: h2}},
+			expected:     &RequestContext{HTTPRequest: &HTTPRequestContext{Headers: map[string][]string{"foo": []string{"bar"}, "foo2": []string{"bar", "bar2"}}}},
+		},
+		{
+			note:         "request context in config (single header) - request context in decision info (with header map full)",
+			config:       []byte(`{"plugin": "test_plugin", "request_context": {"http": {"headers": ["foo"]}}}`),
+			decisionInfo: &server.Info{Bundles: map[string]server.BundleInfo{"b1": {Revision: "A"}}, HTTPRequestContext: logging.HTTPRequestContext{Header: h2}},
+			expected:     &RequestContext{HTTPRequest: &HTTPRequestContext{Headers: map[string][]string{"foo": []string{"bar"}}}},
+		},
+		{
+			note:         "no request context in config - request context in decision info (with header map)",
+			config:       []byte(`{"plugin": "test_plugin"}`),
+			decisionInfo: &server.Info{Bundles: map[string]server.BundleInfo{"b1": {Revision: "A"}}, HTTPRequestContext: logging.HTTPRequestContext{Header: h1}},
+			expected:     nil,
+		},
+		{
+			note:         "request context in config (no http) - request context in decision info (with header map)",
+			config:       []byte(`{"plugin": "test_plugin", "request_context": {}}`),
+			decisionInfo: &server.Info{Bundles: map[string]server.BundleInfo{"b1": {Revision: "A"}}, HTTPRequestContext: logging.HTTPRequestContext{Header: h1}},
+			expected:     nil,
+		},
+		{
+			note:         "request context in config (no headers) - request context in decision info (with header map)",
+			config:       []byte(`{"plugin": "test_plugin", "request_context": {"http": {}}}`),
+			decisionInfo: &server.Info{Bundles: map[string]server.BundleInfo{"b1": {Revision: "A"}}, HTTPRequestContext: logging.HTTPRequestContext{Header: h1}},
+			expected:     nil,
+		},
+		{
+			note:         "request context in config (empty headers list) - request context in decision info (with header map)",
+			config:       []byte(`{"plugin": "test_plugin", "request_context": {"http": {"headers": []}}}`),
+			decisionInfo: &server.Info{Bundles: map[string]server.BundleInfo{"b1": {Revision: "A"}}, HTTPRequestContext: logging.HTTPRequestContext{Header: h1}},
+			expected:     nil,
+		},
+	}
+
+	for i, tc := range cases {
+		t.Run(tc.note, func(t *testing.T) {
+
+			config, err := ParseConfig(tc.config, nil, []string{"test_plugin"})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			plugin := New(config, manager)
+			plugin.Log(ctx, tc.decisionInfo)
+
+			if len(backend.events) == 0 {
+				t.Fatal("expected at least one event")
+			}
+
+			if !reflect.DeepEqual(backend.events[i].RequestContext, tc.expected) {
+				t.Fatalf("unexpected request context, want %+v but got %+v", tc.expected, backend.events[0].RequestContext)
+			}
+		})
 	}
 }
 
@@ -1760,7 +1872,8 @@ func TestPluginMasking(t *testing.T) {
 			note: "simple erase (with body true)",
 			rawPolicy: []byte(`
 				package system.log
-				mask["/input/password"] {
+				import rego.v1
+				mask contains "/input/password" if {
 					input.input.is_sensitive
 				}`),
 			expErased: []string{"/input/password"},
@@ -1776,7 +1889,8 @@ func TestPluginMasking(t *testing.T) {
 			note: "simple erase (with body true, plugin reconfigured)",
 			rawPolicy: []byte(`
 				package system.log
-				mask["/input/password"] {
+				import rego.v1
+				mask contains "/input/password" if {
 					input.input.is_sensitive
 				}`),
 			expErased: []string{"/input/password"},
@@ -1793,7 +1907,8 @@ func TestPluginMasking(t *testing.T) {
 			note: "simple upsert (with body true)",
 			rawPolicy: []byte(`
 				package system.log
-				mask[{"op": "upsert", "path": "/input/password", "value": x}] {
+				import rego.v1
+				mask contains {"op": "upsert", "path": "/input/password", "value": x} if {
 					input.input.password
 					x := "**REDACTED**"
 				}`),
@@ -1811,7 +1926,8 @@ func TestPluginMasking(t *testing.T) {
 			note: "remove even with value set in rule body",
 			rawPolicy: []byte(`
 				package system.log
-				mask[{"op": "remove", "path": "/input/password", "value": x}] {
+				import rego.v1
+				mask contains {"op": "remove", "path": "/input/password", "value": x} if {
 					input.input.password
 					x := "**REDACTED**"
 				}`),
@@ -1828,7 +1944,8 @@ func TestPluginMasking(t *testing.T) {
 			note: "remove when value not defined",
 			rawPolicy: []byte(`
 				package system.log
-				mask[{"op": "remove", "path": "/input/password"}] {
+				import rego.v1
+				mask contains {"op": "remove", "path": "/input/password"} if {
 					input.input.password
 				}`),
 			expErased: []string{"/input/password"},
@@ -1844,10 +1961,11 @@ func TestPluginMasking(t *testing.T) {
 			note: "remove when value not defined in rule body",
 			rawPolicy: []byte(`
 				package system.log
-				mask[{"op": "remove", "path": "/input/password", "value": x}] {
+				import rego.v1
+				mask contains {"op": "remove", "path": "/input/password", "value": x} if {
 					input.input.password
 				}`),
-			errManager: fmt.Errorf("1 error occurred: test.rego:3: rego_unsafe_var_error: var x is unsafe"),
+			errManager: fmt.Errorf("1 error occurred: test.rego:4: rego_unsafe_var_error: var x is unsafe"),
 		},
 		{
 			note: "simple erase - no match",
@@ -1869,7 +1987,8 @@ func TestPluginMasking(t *testing.T) {
 			note: "complex upsert - object key",
 			rawPolicy: []byte(`
 				package system.log
-				mask[{"op": "upsert", "path": "/input/foo", "value": x}] {
+				import rego.v1
+				mask contains {"op": "upsert", "path": "/input/foo", "value": x} if {
 					input.input.foo
 					x := [
 						{"nabs": 1}
@@ -1913,12 +2032,14 @@ func TestPluginMasking(t *testing.T) {
 			rawPolicy: []byte(`
 				package system.log
 
-				mask["/input/password"] {
+				import rego.v1
+
+				mask contains "/input/password" if {
 					input.input.is_sensitive
 				}
 
 				# invalidate JWT signature
-				mask[{"op": "upsert", "path": "/input/jwt", "value": x}]  {
+				mask contains {"op": "upsert", "path": "/input/jwt", "value": x} if {
 					input.input.jwt
 
 					# split jwt string
@@ -1933,7 +2054,7 @@ func TestPluginMasking(t *testing.T) {
 
 				}
 
-				mask[{"op": "upsert", "path": "/input/foo", "value": x}] {
+				mask contains {"op": "upsert", "path": "/input/foo", "value": x} if {
 					input.input.foo
 					x := [
 						{"changed": 1}
@@ -1957,7 +2078,8 @@ func TestPluginMasking(t *testing.T) {
 			note: "print() works",
 			rawPolicy: []byte(`
 				package system.log
-				mask["/input/password"] {
+				import rego.v1
+				mask contains "/input/password" if {
 					print("Erasing /input/password")
 					input.input.is_sensitive
 				}`),
@@ -1975,7 +2097,8 @@ func TestPluginMasking(t *testing.T) {
 			note: "simple upsert on nd_builtin_cache",
 			rawPolicy: []byte(`
 				package system.log
-				mask[{"op": "upsert", "path": "/nd_builtin_cache/rand.intn", "value": x}] {
+				import rego.v1
+				mask contains {"op": "upsert", "path": "/nd_builtin_cache/rand.intn", "value": x} if {
 					input.nd_builtin_cache["rand.intn"]
 					x := "**REDACTED**"
 				}`),
@@ -1992,12 +2115,13 @@ func TestPluginMasking(t *testing.T) {
 			note: "simple upsert on nd_builtin_cache with multiple entries",
 			rawPolicy: []byte(`
 				package system.log
-				mask[{"op": "upsert", "path": "/nd_builtin_cache/rand.intn", "value": x}] {
+				import rego.v1
+				mask contains {"op": "upsert", "path": "/nd_builtin_cache/rand.intn", "value": x} if {
 					input.nd_builtin_cache["rand.intn"]
 					x := "**REDACTED**"
 				}
 
-				mask[{"op": "upsert", "path": "/nd_builtin_cache/net.lookup_ip_addr", "value": y}] {
+				mask contains {"op": "upsert", "path": "/nd_builtin_cache/net.lookup_ip_addr", "value": y} if {
 					obj := input.nd_builtin_cache["net.lookup_ip_addr"]
 					y := object.union({k: "4.4.x.x" | obj[k]; startswith(k, "[\"4.4.")},
 					                  {k: obj[k] | obj[k]; not startswith(k, "[\"4.4.")})
@@ -2157,7 +2281,8 @@ func TestPluginDrop(t *testing.T) {
 			note: "simple drop",
 			rawPolicy: []byte(`
 			package system.log
-			drop {
+			import rego.v1
+			drop if {
 				endswith(input.path, "bar")
 			}`),
 			event: &EventV1{Path: "foo/bar"},
@@ -2168,7 +2293,8 @@ func TestPluginDrop(t *testing.T) {
 			note: "no drop",
 			rawPolicy: []byte(`
 			package system.log
-			drop {
+			import rego.v1
+			drop if {
 				endswith(input.path, "bar")
 			}`),
 			event:    &EventV1{Path: "foo/foo"},
@@ -2235,6 +2361,154 @@ func TestPluginDrop(t *testing.T) {
 				t.Errorf("Plugin: Expected drop to be %v got %v", tc.expected, drop)
 			}
 		})
+	}
+}
+
+func TestPluginMaskErrorHandling(t *testing.T) {
+	rawPolicy := []byte(`
+			package system.log
+			import rego.v1
+			drop if {
+				endswith(input.path, "bar")
+			}`)
+	event := &EventV1{Path: "foo/bar"}
+
+	// Setup fixture. Populate store with simple drop policy.
+	ctx := context.Background()
+	store := inmem.New()
+
+	//checks if raw policy is valid and stores policy in store
+	err := storage.Txn(ctx, store, storage.WriteParams, func(txn storage.Transaction) error {
+		if err := store.UpsertPolicy(ctx, txn, "test.rego", rawPolicy); err != nil {
+			return err
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var output []string
+
+	// Create and start manager. Start is required so that stored policies
+	// get compiled and made available to the plugin.
+	manager, err := plugins.New(
+		nil,
+		"test",
+		store,
+		plugins.EnablePrintStatements(true),
+		plugins.PrintHook(appendingPrintHook{printed: &output}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	// Instantiate the plugin.
+	cfg := &Config{Service: "svc"}
+	trigger := plugins.DefaultTriggerMode
+	cfg.validateAndInjectDefaults([]string{"svc"}, nil, &trigger)
+
+	plugin := New(cfg, manager)
+
+	if err := plugin.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	input, err := event.AST()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	type badTransaction struct {
+		storage.Transaction
+	}
+
+	expErr := "storage_invalid_txn_error: unexpected transaction type *logs.badTransaction"
+	err = plugin.maskEvent(ctx, &badTransaction{}, input, event)
+	if err.Error() != expErr {
+		t.Fatalf("Expected error %v got %v", expErr, err)
+	}
+
+	// We expect the same error on a second call, even though the mask query failed to prepare and won't be prepared again.
+	err = plugin.maskEvent(ctx, nil, input, event)
+	if err.Error() != expErr {
+		t.Fatalf("Expected error %v got %v", expErr, err)
+	}
+}
+
+func TestPluginDropErrorHandling(t *testing.T) {
+	rawPolicy := []byte(`
+			package system.log
+			import rego.v1
+			drop if {
+				endswith(input.path, "bar")
+			}`)
+	event := &EventV1{Path: "foo/bar"}
+
+	// Setup fixture. Populate store with simple drop policy.
+	ctx := context.Background()
+	store := inmem.New()
+
+	//checks if raw policy is valid and stores policy in store
+	err := storage.Txn(ctx, store, storage.WriteParams, func(txn storage.Transaction) error {
+		if err := store.UpsertPolicy(ctx, txn, "test.rego", rawPolicy); err != nil {
+			return err
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var output []string
+
+	// Create and start manager. Start is required so that stored policies
+	// get compiled and made available to the plugin.
+	manager, err := plugins.New(
+		nil,
+		"test",
+		store,
+		plugins.EnablePrintStatements(true),
+		plugins.PrintHook(appendingPrintHook{printed: &output}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	// Instantiate the plugin.
+	cfg := &Config{Service: "svc"}
+	trigger := plugins.DefaultTriggerMode
+	cfg.validateAndInjectDefaults([]string{"svc"}, nil, &trigger)
+
+	plugin := New(cfg, manager)
+
+	if err := plugin.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	input, err := event.AST()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	type badTransaction struct {
+		storage.Transaction
+	}
+
+	expErr := "storage_invalid_txn_error: unexpected transaction type *logs.badTransaction"
+	_, err = plugin.dropEvent(ctx, &badTransaction{}, input)
+	if err.Error() != expErr {
+		t.Fatalf("Expected error %v got %v", expErr, err)
+	}
+
+	// We expect the same error on a second call, even though the drop query failed to prepare and won't be prepared again.
+	_, err = plugin.dropEvent(ctx, nil, input)
+	if err.Error() != expErr {
+		t.Fatalf("Expected error %v got %v", expErr, err)
 	}
 }
 

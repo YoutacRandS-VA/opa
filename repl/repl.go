@@ -18,6 +18,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/open-policy-agent/opa/bundle"
 	"github.com/open-policy-agent/opa/compile"
 
 	"github.com/open-policy-agent/opa/version"
@@ -51,6 +52,8 @@ type REPL struct {
 	profiler            bool
 	strictBuiltinErrors bool
 	capabilities        *ast.Capabilities
+	regoVersion         ast.RegoVersion
+	initBundles         map[string]*bundle.Bundle
 
 	// TODO(tsandall): replace this state with rule definitions
 	// inside the default module.
@@ -128,6 +131,11 @@ func New(store storage.Store, historyPath string, output io.Writer, outputFormat
 
 func (r *REPL) WithCapabilities(capabilities *ast.Capabilities) *REPL {
 	r.capabilities = capabilities
+	return r
+}
+
+func (r *REPL) WithInitBundles(b map[string]*bundle.Bundle) *REPL {
+	r.initBundles = b
 	return r
 }
 
@@ -344,6 +352,23 @@ func (r *REPL) WithRuntime(term *ast.Term) *REPL {
 	return r
 }
 
+// WithRegoVersion sets the Rego version to v.
+func (r *REPL) WithRegoVersion(v ast.RegoVersion) *REPL {
+	r.regoVersion = v
+	return r
+}
+
+// WithV1Compatible sets the Rego version to v1.
+// Deprecated: Use WithRegoVersion instead.
+func (r *REPL) WithV1Compatible(v1Compatible bool) *REPL {
+	if v1Compatible {
+		r.regoVersion = ast.RegoV1
+	} else {
+		r.regoVersion = ast.DefaultRegoVersion
+	}
+	return r
+}
+
 // SetOPAVersionReport sets the information about the latest OPA release.
 func (r *REPL) SetOPAVersionReport(report [][2]string) {
 	r.mtx.Lock()
@@ -482,7 +507,7 @@ func (r *REPL) cmdShow(args []string) error {
 			return nil
 		}
 		module := r.modules[r.currentModuleID]
-		bs, err := format.Ast(module)
+		bs, err := format.AstWithOpts(module, format.Opts{RegoVersion: module.RegoVersion()})
 		if err != nil {
 			return err
 		}
@@ -502,9 +527,8 @@ func (r *REPL) cmdShow(args []string) error {
 		}
 		fmt.Fprintln(r.output, string(b))
 		return nil
-	} else {
-		return fmt.Errorf("unknown option '%v'", args[0])
 	}
+	return fmt.Errorf("unknown option '%v'", args[0])
 }
 
 type replDebugState struct {
@@ -682,7 +706,7 @@ func (r *REPL) unsetRule(ctx context.Context, name ast.Var) (bool, error) {
 	return true, nil
 }
 
-func (r *REPL) unsetPackage(ctx context.Context, pkg *ast.Package) (bool, error) {
+func (r *REPL) unsetPackage(_ context.Context, pkg *ast.Package) (bool, error) {
 	path := fmt.Sprintf("%v", pkg.Path)
 	_, ok := r.modules[path]
 	if ok {
@@ -742,7 +766,7 @@ func (r *REPL) recompile(ctx context.Context, cpy *ast.Module) error {
 	return nil
 }
 
-func (r *REPL) compileBody(ctx context.Context, compiler *ast.Compiler, body ast.Body) (ast.Body, *ast.TypeEnv, error) {
+func (r *REPL) compileBody(_ context.Context, compiler *ast.Compiler, body ast.Body) (ast.Body, *ast.TypeEnv, error) {
 	r.timerStart(metrics.RegoQueryCompile)
 	defer r.timerStop(metrics.RegoQueryCompile)
 
@@ -761,6 +785,12 @@ func (r *REPL) compileBody(ctx context.Context, compiler *ast.Compiler, body ast
 func (r *REPL) compileRule(ctx context.Context, rule *ast.Rule) error {
 
 	var unset bool
+
+	if r.regoVersion == ast.RegoV1 {
+		if errs := ast.CheckRegoV1(rule); errs != nil {
+			return errs
+		}
+	}
 
 	if rule.Head.Assign {
 		var err error
@@ -892,10 +922,26 @@ func (r *REPL) evalBufferMulti(ctx context.Context) error {
 }
 
 func (r *REPL) parserOptions() (ast.ParserOptions, error) {
-	if r.currentModuleID != "" {
-		return future.ParserOptionsFromFutureImports(r.modules[r.currentModuleID].Imports)
+	if r.regoVersion == ast.RegoV1 {
+		return ast.ParserOptions{RegoVersion: ast.RegoV1}, nil
 	}
-	return ast.ParserOptions{}, nil
+	if r.currentModuleID != "" {
+		opts, err := future.ParserOptionsFromFutureImports(r.modules[r.currentModuleID].Imports)
+		if err == nil {
+			for _, i := range r.modules[r.currentModuleID].Imports {
+				if ast.Compare(i.Path.Value, ast.RegoV1CompatibleRef) == 0 {
+					opts.RegoVersion = ast.RegoV0CompatV1
+
+					// ast.RegoV0CompatV1 sets parsing requirements, but doesn't imply allowed future keywords
+					if r.capabilities != nil {
+						opts.FutureKeywords = r.capabilities.FutureKeywords
+					}
+				}
+			}
+		}
+		return opts, err
+	}
+	return ast.ParserOptions{RegoVersion: r.regoVersion}, nil
 }
 
 func (r *REPL) loadCompiler(ctx context.Context) (*ast.Compiler, error) {
@@ -1137,9 +1183,11 @@ func (r *REPL) evalPackage(p *ast.Package) error {
 		return nil
 	}
 
-	r.modules[moduleID] = &ast.Module{
+	m := ast.Module{
 		Package: p,
 	}
+	m.SetRegoVersion(r.regoVersion)
+	r.modules[moduleID] = &m
 
 	r.currentModuleID = moduleID
 
@@ -1227,21 +1275,37 @@ func (r *REPL) loadHistory(prompt *liner.State) {
 }
 
 func (r *REPL) loadModules(ctx context.Context, txn storage.Transaction) (map[string]*ast.Module, error) {
+	modules := make(map[string]*ast.Module)
+
+	if len(r.initBundles) > 0 {
+		for bundleName, b := range r.initBundles {
+			for name, module := range b.ParsedModules(bundleName) {
+				modules[name] = module
+			}
+		}
+	}
 
 	ids, err := r.store.ListPolicies(ctx, txn)
 	if err != nil {
 		return nil, err
 	}
 
-	modules := make(map[string]*ast.Module, len(ids))
-
 	for _, id := range ids {
+		// skip re-parsing
+		if _, haveMod := modules[id]; haveMod {
+			continue
+		}
+
 		bs, err := r.store.GetPolicy(ctx, txn, id)
 		if err != nil {
 			return nil, err
 		}
 
-		parsed, err := ast.ParseModule(id, string(bs))
+		popts := ast.ParserOptions{
+			RegoVersion: r.regoVersion,
+		}
+
+		parsed, err := ast.ParseModuleWithOpts(id, string(bs), popts)
 		if err != nil {
 			return nil, err
 		}
@@ -1252,7 +1316,7 @@ func (r *REPL) loadModules(ctx context.Context, txn storage.Transaction) (map[st
 	return modules, nil
 }
 
-func (r *REPL) printTypes(ctx context.Context, typeEnv *ast.TypeEnv, body ast.Body) {
+func (r *REPL) printTypes(_ context.Context, typeEnv *ast.TypeEnv, body ast.Body) {
 
 	ast.WalkRefs(body, func(ref ast.Ref) bool {
 		fmt.Fprintf(r.output, "# %v: %v\n", ref, typeEnv.Get(ref))

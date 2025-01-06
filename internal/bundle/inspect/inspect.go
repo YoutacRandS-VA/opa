@@ -22,15 +22,29 @@ import (
 
 // Info represents information about a bundle.
 type Info struct {
-	Manifest    bundle.Manifest          `json:"manifest,omitempty"`
+	Manifest    *bundle.Manifest         `json:"manifest,omitempty"`
 	Signatures  bundle.SignaturesConfig  `json:"signatures_config,omitempty"`
 	WasmModules []map[string]interface{} `json:"wasm_modules,omitempty"`
 	Namespaces  map[string][]string      `json:"namespaces,omitempty"`
 	Annotations []*ast.AnnotationsRef    `json:"annotations,omitempty"`
+	Required    *ast.Capabilities        `json:"capabilities,omitempty"`
 }
 
 func File(path string, includeAnnotations bool) (*Info, error) {
+	return FileForRegoVersion(ast.RegoV0, path, includeAnnotations)
+}
+
+func FileForRegoVersion(regoVersion ast.RegoVersion, path string, includeAnnotations bool) (*Info, error) {
+	if strings.HasSuffix(path, bundle.RegoExt) {
+		return fileInfoForRegoVersion(regoVersion, path, includeAnnotations)
+	}
+
+	return bundleOrDirInfoForRegoVersion(regoVersion, path, includeAnnotations)
+}
+
+func bundleOrDirInfoForRegoVersion(regoVersion ast.RegoVersion, path string, includeAnnotations bool) (*Info, error) {
 	b, err := loader.NewFileLoader().
+		WithRegoVersion(regoVersion).
 		WithSkipBundleVerification(true).
 		WithProcessAnnotation(true). // Always process annotations, for enriching namespace listing
 		WithJSONOptions(&json.Options{
@@ -46,7 +60,7 @@ func File(path string, includeAnnotations bool) (*Info, error) {
 		return nil, err
 	}
 
-	bi := &Info{Manifest: b.Manifest}
+	bi := &Info{Manifest: &b.Manifest}
 
 	namespaces := make(map[string][]string, len(b.Modules))
 	modules := make([]*ast.Module, 0, len(b.Modules))
@@ -102,6 +116,20 @@ func File(path string, includeAnnotations bool) (*Info, error) {
 		wasmModules = append(wasmModules, wasmModule)
 	}
 	bi.WasmModules = wasmModules
+
+	moduleMap := make(map[string]*ast.Module, len(b.Modules))
+	for _, f := range b.Modules {
+		moduleMap[f.URL] = f.Parsed
+	}
+
+	c := ast.NewCompiler().
+		WithAllowUndefinedFunctionCalls(true)
+	c.Compile(moduleMap)
+	if c.Failed() {
+		return bi, c.Errors
+	}
+
+	bi.Required = c.Required
 
 	return bi, nil
 }
@@ -178,4 +206,56 @@ func (bi *Info) getBundleDataWasmAndSignatures(name string) error {
 	}
 
 	return nil
+}
+
+func fileInfoForRegoVersion(regoVersion ast.RegoVersion, path string, includeAnnotations bool) (*Info, error) {
+	res, err := loader.NewFileLoader().
+		WithRegoVersion(regoVersion).
+		WithSkipBundleVerification(true).
+		WithProcessAnnotation(true). // Always process annotations, for enriching namespace listing
+		WithJSONOptions(&json.Options{
+			MarshalOptions: json.MarshalOptions{
+				IncludeLocation: json.NodeToggle{
+					// Annotation location data is only included if includeAnnotations is set
+					AnnotationsRef: includeAnnotations,
+				},
+			},
+		}).
+		All([]string{path})
+	if err != nil {
+		return nil, err
+	}
+	bi := &Info{
+		Namespaces: make(map[string][]string, len(res.Modules)),
+	}
+
+	moduleMap := make(map[string]*ast.Module, len(res.Modules))
+
+	for _, m := range res.Modules {
+		bi.Namespaces[m.Parsed.Package.Path.String()] = append(
+			bi.Namespaces[m.Parsed.Package.Path.String()],
+			filepath.Clean(m.Name),
+		)
+		moduleMap[m.Name] = m.Parsed
+	}
+
+	if includeAnnotations {
+		as, errs := ast.BuildAnnotationSet(util.Values(moduleMap))
+		if len(errs) > 0 {
+			return nil, errs
+		}
+
+		bi.Annotations = as.Flatten()
+	}
+
+	c := ast.NewCompiler().
+		WithAllowUndefinedFunctionCalls(true)
+	c.Compile(moduleMap)
+	if c.Failed() {
+		return bi, c.Errors
+	}
+
+	bi.Required = c.Required
+
+	return bi, nil
 }

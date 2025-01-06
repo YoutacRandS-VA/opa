@@ -3,6 +3,7 @@
 package download
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -15,14 +16,15 @@ import (
 	"strings"
 	"time"
 
-	"github.com/containerd/containerd/errdefs"
 	"github.com/containerd/containerd/remotes"
 	"github.com/containerd/containerd/remotes/docker"
+	"github.com/containerd/errdefs"
 
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	oraslib "oras.land/oras-go/v2"
 	"oras.land/oras-go/v2/content/oci"
 
+	"github.com/open-policy-agent/opa/ast"
 	"github.com/open-policy-agent/opa/bundle"
 	"github.com/open-policy-agent/opa/logging"
 	"github.com/open-policy-agent/opa/metrics"
@@ -77,6 +79,12 @@ func (d *OCIDownloader) WithSizeLimitBytes(n int64) *OCIDownloader {
 // WithBundlePersistence specifies if the downloaded bundle will eventually be persisted to disk.
 func (d *OCIDownloader) WithBundlePersistence(persist bool) *OCIDownloader {
 	d.persist = persist
+	return d
+}
+
+// WithBundleParserOpts specifies the parser options to use when parsing downloaded bundles.
+func (d *OCIDownloader) WithBundleParserOpts(opts ast.ParserOptions) *OCIDownloader {
+	d.bundleParserOpts = opts
 	return d
 }
 
@@ -203,13 +211,14 @@ func (d *OCIDownloader) oneShot(ctx context.Context) error {
 	d.SetCache(resp.etag) // set the current etag sha to the cache
 
 	if d.f != nil {
-		d.f(ctx, Update{ETag: resp.etag, Bundle: resp.b, Error: nil, Metrics: m, Raw: resp.raw})
+		d.f(ctx, Update{ETag: resp.etag, Bundle: resp.b, Error: nil, Metrics: m, Raw: resp.raw, Size: resp.size})
 	}
 	return nil
 }
 
 func (d *OCIDownloader) download(ctx context.Context, m metrics.Metrics) (*downloaderResponse, error) {
 	d.logger.Debug("OCI - Download starting.")
+	var buf bytes.Buffer
 
 	preferences := []string{fmt.Sprintf("modes=%v,%v", defaultBundleMode, deltaBundleMode)}
 
@@ -249,14 +258,20 @@ func (d *OCIDownloader) download(ctx context.Context, m metrics.Metrics) (*downl
 		}, nil
 	}
 	fileReader, err := os.Open(bundleFilePath)
+
+	cnt := &count{}
+	r := io.TeeReader(fileReader, cnt)
+	tee := io.TeeReader(r, &buf)
+
 	if err != nil {
 		return nil, err
 	}
-	loader := bundle.NewTarballLoaderWithBaseURL(fileReader, d.localStorePath)
+	loader := bundle.NewTarballLoaderWithBaseURL(tee, d.localStorePath)
 	reader := bundle.NewCustomReader(loader).
 		WithMetrics(m).
 		WithBundleVerificationConfig(d.bvc).
-		WithBundleEtag(etag)
+		WithBundleEtag(etag).
+		WithRegoVersion(d.bundleParserOpts.RegoVersion)
 	bundleInfo, err := reader.Read()
 	if err != nil {
 		return &downloaderResponse{}, fmt.Errorf("unexpected error %w", err)
@@ -266,9 +281,10 @@ func (d *OCIDownloader) download(ctx context.Context, m metrics.Metrics) (*downl
 
 	return &downloaderResponse{
 		b:        &bundleInfo,
-		raw:      fileReader,
+		raw:      &buf,
 		etag:     etag,
 		longPoll: false,
+		size:     cnt.Bytes(),
 	}, nil
 }
 

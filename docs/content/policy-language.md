@@ -7,7 +7,7 @@ toc: true
 
 ```live:eg:module:hidden
 package example
-import future.keywords
+import rego.v1
 ```
 
 OPA is purpose built for reasoning about information represented in structured
@@ -26,8 +26,8 @@ of the system.
 
 {{< info >}}
 The examples in this section try to represent the best practices. As such, they
-make use of keywords that are meant to become standard keywords at some point in
-time, but have been introduced gradually.
+make use of keywords that will become standard keywords in [OPA v1.0](../opa-1),
+but have been introduced gradually.
 [See the docs on _future keywords_](#future-keywords) for more information.
 {{< /info >}}
 
@@ -49,7 +49,7 @@ to optimize queries to improve performance.
 
 In while reviewing the examples below, you might find it helpful to follow along
 using the online [OPA playground](http://play.openpolicyagent.org). The
-playground also allows sharing of examples via URL which can be helpful when 
+playground also allows sharing of examples via URL which can be helpful when
 asking questions on the [OPA Slack](https://slack.openpolicyagent.org).
 In addition to these official resources, you may also be interested to check
 out the community learning materials and tools.
@@ -311,17 +311,17 @@ A simple example is a regex to match a valid Rego variable. With a regular strin
 
 Composite values define collections. In simple cases, composite values can be treated as constants like [Scalar Values](#scalar-values):
 
-```live:eg/cube:module
-cube := {"width": 3, "height": 4, "depth": 5}
+```live:eg/cuboid:module
+cuboid := {"width": 3, "height": 4, "depth": 5}
 ```
 
 The result:
 
-```live:eg/cube:query:merge_down
-cube.width
+```live:eg/cuboid:query:merge_down
+cuboid.width
 ```
 
-```live:eg/cube:output
+```live:eg/cuboid:output
 ```
 
 Composite values can also be defined in terms of [Variables](#variables) or [References](#references). For example:
@@ -337,6 +337,24 @@ d := {"a": a, "x": [b, c]}
 ```
 
 By defining composite values in terms of variables and references, rules can define abstractions over raw data and other rules.
+
+### Arrays
+
+Arrays are ordered collections of values. Arrays in Rego are zero-indexed, and may contain any value, including
+variable references.
+
+```live:eg/arrays:module:merge_down
+arr := [1, "two", 3]
+```
+
+```live:eg/arrays/lookup:query:merge_down
+last := arr[2]
+```
+
+```live:eg/arrays/lookup:output:merge_down
+```
+
+Use arrays when order matters and duplicate values should be allowed.
 
 ### Objects
 
@@ -382,11 +400,11 @@ collections of unique values. Just like other composite values, sets can be
 defined in terms of scalars, variables, references, and other composite values.
 For example:
 
-```live:eg/cube/sets:query:merge_down
-s := {cube.width, cube.height, cube.depth}
+```live:eg/cuboid/sets:query:merge_down
+s := {cuboid.width, cuboid.height, cuboid.depth}
 ```
 
-```live:eg/cube/sets:output
+```live:eg/cuboid/sets:output
 ```
 
 > Set documents are collections of values without keys. OPA represents set
@@ -577,12 +595,12 @@ s[[1, x]]
 Rules are often written in terms of multiple expressions that contain references to documents. In the following example, the rule defines a set of arrays where each array contains an application name and a hostname of a server where the application is deployed.
 
 ```live:eg/data/multi:module
-apps_and_hostnames[[name, hostname]] {
-    some i, j, k
-    name := apps[i].name
-    server := apps[i].servers[_]
-    sites[j].servers[k].name == server
-    hostname := sites[j].servers[k].hostname
+apps_and_hostnames contains [name, hostname] if {
+	some i, j, k
+	name := apps[i].name
+	server := apps[i].servers[_]
+	sites[j].servers[k].name == server
+	hostname := sites[j].servers[k].hostname
 }
 ```
 
@@ -605,14 +623,14 @@ Don’t worry about understanding everything in this example right now. There ar
 Using a different key on the same array or object provides the equivalent of self-join in SQL. For example, the following rule defines a document containing apps deployed on the same site as `"mysql"`:
 
 ```live:eg/data/self_join:module
-same_site[apps[k].name] {
-    some i, j, k
-    apps[i].name == "mysql"
-    server := apps[i].servers[_]
-    server == sites[j].servers[_].name
-    other_server := sites[j].servers[_].name
-    server != other_server
-    other_server == apps[k].servers[_]
+same_site contains apps[k].name if {
+	some i, j, k
+	apps[i].name == "mysql"
+	server := apps[i].servers[_]
+	server == sites[j].servers[_].name
+	other_server := sites[j].servers[_].name
+	server != other_server
+	other_server == apps[k].servers[_]
 }
 ```
 
@@ -756,13 +774,12 @@ The sample code in this section make use of the data defined in [Examples](#exam
 
 {{< info >}}
 Rule definitions can be more expressive when using the _future keywords_ `contains` and
-`if`. They are optional, and you will find examples below of defining rules without them.
+`if` which will become standard in [OPA v1.0](../opa-1).
 
-To follow along as-is, please import the keywords:
+To follow along as-is, please import the keywords, or preferably, import `rego.v1`:
 
 ```live:eg/data/info:module:read_only
-import future.keywords.if
-import future.keywords.contains
+import rego.v1
 ```
 
 [See the docs on _future keywords_](#future-keywords) for more information.
@@ -774,15 +791,6 @@ The following rule defines a set containing the hostnames of all servers:
 
 ```live:eg/data/rules:module:read_only
 hostnames contains name if {
-    name := sites[_].servers[_].hostname
-}
-```
-
-Note that the [(future) keywords `contains` and `if`](#future-keywords) are optional here.
-If future keywords are not available to you, you can define the same rule as follows:
-
-```live:eg/data/rules2:module:read_only
-hostnames[name] {
     name := sites[_].servers[_].hostname
 }
 ```
@@ -806,7 +814,7 @@ First, the rule defines a set document where the contents are defined by the var
 
 For a more formal definition of the rule syntax, see the [Policy Reference](../policy-reference/#grammar) document.
 
-Second, the `sites[_].servers[_].hostname` fragment selects the `hostname` attribute from all of the objects in the `servers` collection. From reading the fragment in isolation we cannot tell whether the fragment refers to arrays or objects. We only know that it refers to a collections of values.
+Second, the `sites[_].servers[_].hostname` fragment selects the `hostname` attribute from all the objects in the `servers` collection. From reading the fragment in isolation we cannot tell whether the fragment refers to arrays or objects. We only know that it refers to a collections of values.
 
 Third, the `name := sites[_].servers[_].hostname` expression binds the value of the `hostname` attribute to the variable `name`, which is also declared in the head of the rule.
 
@@ -894,21 +902,6 @@ instances[x]
 ```live:eg/data/incremental_rule:output
 ```
 
-Note that the [(future) keywords `contains` and `if`](#future-keywords) are optional here.
-If future keywords are not available to you, you can define the same rule as follows:
-
-```live:eg/data/incremental_rule2:module
-instances[instance] {
-    server := sites[_].servers[_]
-    instance := {"address": server.hostname, "name": server.name}
-}
-
-instances[instance] {
-    container := containers[_]
-    instance := {"address": container.ipaddress, "name": container.name}
-}
-```
-
 ### Complete Definitions
 
 In addition to rules that _partially_ define sets and objects, Rego also
@@ -963,24 +956,17 @@ max_memory with user as "johnson"
 ```live:eg/conflicting_rules/undefined:output:expect_undefined
 ```
 
-In some cases, having an undefined result for a document is not desirable. In those cases, policies can use the [Default Keyword](#default-keyword) to provide a fallback value.
-
-Note that the [(future) keyword `if`](#future-keywords) is optional here.
-If future keywords are not available to you, you can define complete rules like this:
-
-```live:eg/conflicting_rules2:module
-max_memory := 32 { power_users[user] }
-max_memory := 4 { restricted_users[user] }
-```
+In some cases, having an undefined result for a document is not desirable.
+In those cases, policies can use the [Default Keyword](#default-keyword) to provide a fallback value.
 
 ### Rule Heads containing References
 
 As a shorthand for defining nested rule structures, it's valid to use references as rule heads:
 
 ```live:eg/ref_heads:module
-fruit.apple.seeds = 12
+fruit.apple.seeds := 12
 
-fruit.orange.color = "orange"
+fruit.orange.color := "orange"
 ```
 
 This module defines _two complete rules_, `data.example.fruit.apple.seeds` and `data.example.fruit.orange.color`:
@@ -1032,25 +1018,25 @@ Module:
 ```live:general_ref_head:module
 package example
 
-import future.keywords
+import rego.v1
 
 # A partial object rule that converts a list of users to a mapping by "role" and then "id".
 users_by_role[role][id] := user if {
-    some user in input.users
-    id := user.id
-    role := user.role
+	some user in input.users
+	id := user.id
+	role := user.role
 }
 
 # Partial rule with an explicit "admin" key override
 users_by_role.admin[id] := user if {
-    some user in input.admins
-    id := user.id
+	some user in input.admins
+	id := user.id
 }
 
 # Leaf entries can be partial sets
 users_by_country[country] contains user.id if {
-    some user in input.users
-    country := user.country
+	some user in input.users
+	country := user.country
 }
 ```
 
@@ -1066,10 +1052,12 @@ The first variable declared in a rule head's reference divides the reference in 
 ```live:general_ref_head_conflict:module
 package example
 
+import rego.v1
+
 # R1
-p[x].r := y {
-    x := "q"
-    y := 1
+p[x].r := y if {
+	x := "q"
+	y := 1
 }
 
 # R2
@@ -1089,10 +1077,12 @@ Conflicts are detected at compile-time, where possible, between rules even if th
 ```live:general_ref_head_conflict2:module
 package example
 
+import rego.v1
+
 # R1
-p[x].r := y {
-    x := "foo"
-    y := 1
+p[x].r := y if {
+	x := "foo"
+	y := 1
 }
 
 # R2
@@ -1102,7 +1092,7 @@ p.q.r := 2
 p.q.r.s := 3
 ```
 
-Error: 
+Error:
 
 ```live:general_ref_head_conflict2:output:expect_rego_error
 ```
@@ -1114,16 +1104,18 @@ Rules are not allowed to overlap with object values of other rules.
 ```live:general_ref_head_conflict3:module
 package example
 
+import rego.v1
+
 # R1
 p.q.r := {"s": 1}
 
 # R2
-p[x].r.t := 2 {
-    x := "q"
+p[x].r.t := 2 if {
+	x := "q"
 }
 ```
 
-Error: 
+Error:
 
 ```live:general_ref_head_conflict3:output:expect_eval_error
 ```
@@ -1134,12 +1126,14 @@ We won't get a conflict if we update the policy to the following:
 ```live:general_ref_head_conflict4:module
 package example
 
+import rego.v1
+
 # R1
 p.q.r.s := 1
 
 # R2
-p[x].r.t := 2 {
-    x := "q"
+p[x].r.t := 2 if {
+	x := "q"
 }
 ```
 
@@ -1168,16 +1162,6 @@ trim_and_split("   foo.bar ")
 ```live:eg/basic_function:output
 ```
 
-Note that the [(future) keyword `if`](#future-keywords) is optional here.
-If future keywords are not available to you, you can define the same function as follows:
-
-```live:eg/basic_function2:module:read_only
-trim_and_split(s) := x {
-     t := trim(s, " ")
-     x := split(t, ".")
-}
-```
-
 Functions may have an arbitrary number of inputs, but exactly one output. Function arguments may be any kind of term. For example, suppose we have the following function:
 
 ```live:eg/function_input:module:read_only
@@ -1200,11 +1184,9 @@ be the literal `true`. Furthermore, `if` can be used to write shorter definition
 function declarations below are equivalent:
 
 ```live:eg/function_output_unset:module:read_only
-f(x) { x == "foo" }
 f(x) if { x == "foo" }
 f(x) if x == "foo"
 
-f(x) := true { x == "foo" }
 f(x) := true if { x == "foo" }
 f(x) := true if x == "foo"
 ```
@@ -1383,7 +1365,7 @@ t
 ```live:eg/simple_negation:output
 ```
 
-Negation is required to check whether some value _does not_ exist in a collection: `not p["foo"]`. That is not the same as complementing the `==` operator in an expression `p[_] == "foo"` which yields `p[_] != "foo"` 
+Negation is required to check whether some value _does not_ exist in a collection: `not p["foo"]`. That is not the same as complementing the `==` operator in an expression `p[_] == "foo"` which yields `p[_] != "foo"`
 which means for any item in `p`, return true if the item is not `"foo"`. See more details [here](https://docs.styra.com/regal/rules/bugs/not-equals-in-loop).
 
 For example, we can write a rule that defines a document containing names of apps not deployed on the `"prod"` site:
@@ -1433,8 +1415,6 @@ There must be no apps named "bitcoin-miner".
 The most expressive way to state this in Rego is using the `every` keyword:
 
 ```live:eg/data/every_alternative:module:read_only
-import future.keywords.every
-
 no_bitcoin_miners_using_every if {
     every app in apps {
         app.name != "bitcoin-miner"
@@ -1611,7 +1591,7 @@ Modules use the same syntax to declare dependencies on [Base and Virtual Documen
 
 ```live:import_data:module:read_only
 package opa.examples
-import future.keywords # uses 'in' and 'contains' and 'if'
+import rego.v1 # uses 'in' and 'contains' and 'if'
 
 import data.servers
 
@@ -1625,7 +1605,7 @@ Similarly, modules can declare dependencies on query arguments by specifying an 
 
 ```live:import_input:module:read_only
 package opa.examples
-import future.keywords
+import rego.v1
 
 import input.user
 import input.method
@@ -1657,7 +1637,7 @@ Imports can include an optional `as` keyword to handle namespacing issues:
 
 ```live:import_namespacing:module:read_only
 package opa.examples
-import future.keywords
+import rego.v1
 
 import data.servers as my_servers
 
@@ -1669,32 +1649,32 @@ http_servers contains server if {
 
 ## Future Keywords
 
-To ensure backwards-compatibility, new keywords (like `every`) are introduced slowly.
-In the first stage, users can opt-in to using the new keywords via a special import:
+To ensure backwards-compatibility, new keywords (like `every`) were introduced slowly.
+In the first stage, users could opt-in to using the new keywords via a special import:
 
 * `import future.keywords` introduces _all_ future keywords, and
 * `import future.keywords.x` _only_ introduces the `x` keyword -- see below for all known future keywords.
+* **Recommended** `import rego.v1` introduces all future keywords, and enforces the use of `if` and `contains` in rule heads where applicable.
 
-{{< danger >}}
-Using `import future.keywords` to import all future keywords means an **opt-out of a
-safety measure**:
+{{< info >}}
+It is recommended to use the `rego.v1` import instead of `future.keywords` imports,
+as this will ensure that your policy is compatible with the future release of [OPA v1.0](../opa-1).
+If the `rego.v1` import is present in a module, then `future.keywords` and
+`future.keywords.*` import is implied, and not allowed.
+{{< /info >}}
 
-With a new version of OPA, the set of "all" future keywords can grow, and policies that
-worked with the previous version of OPA stop working.
+In [OPA v1.0](../opa-1), the new keywords will become _standard_, and
+the import will become a no-op that can safely be removed. This should give all
+users ample time to update their policies, so that the new keyword will not cause
+clashes with existing variable names.
 
-This **cannot happen** when you selectively import the future keywords as you need them.
-{{< /danger>}}
-
-At some point in the future, the keyword will become _standard_, and the import will
-become a no-op that can safely be removed. This should give all users ample time to
-update their policies, so that the new keyword will not cause clashes with existing
-variable names.
-
+{{< info >}}
 Note that some future keyword imports have consequences on pretty-printing:
 If `contains` or `if` are imported, the pretty-printer will use them as applicable
 when formatting the modules.
+{{< /info >}}
 
-This is the list of all future keywords known to OPA:
+This is the list of all future keywords that will become standard in OPA v1.0:
 
 ### `future.keywords.in`
 
@@ -1810,14 +1790,12 @@ For using the `some` keyword with iteration, see
 {{< info >}}
 `every` is a future keyword and needs to be imported.
 
-`import future.keywords.every` introduces the `every` keyword described here.
+`import rego.v1` or, alternatively, `import future.keywords.every` introduces the `every` keyword described here.
 
 [See the docs on _future keywords_](#future-keywords) for more information.
 {{< /info >}}
 
 ```live:eg/data/every0:module:merge_down
-import future.keywords.every
-
 names_with_dev if {
     some site in sites
     site.name == "dev"
@@ -1852,8 +1830,6 @@ Used with a key argument, the index, or property name (for objects), comes into 
 scope of the body evaluation:
 
 ```live:eg/every1:module:merge_down
-import future.keywords.every
-
 array_domain if {
     every i, x in [1, 2, 3] { x-i == 1 } # array domain
 }
@@ -1877,8 +1853,6 @@ Semantically, `every x in xs { p(x) }` is equivalent to, but shorter than, a "no
 construct using a helper rule:
 
 ```live:eg/every2:module:merge_down
-import future.keywords.every
-
 xs := [2, 2, 4, 8]
 larger_than_one(x) := x > 1
 
@@ -2073,7 +2047,7 @@ count(input.x) with count as 3 with input as {}
 
 The `default` keyword allows policies to define a default value for documents
 produced by rules with [Complete Definitions](#complete-definitions). The
-default value is used when all of the rules sharing the same name are undefined.
+default value is used when all the rules sharing the same name are undefined.
 
 For example:
 
@@ -2124,7 +2098,7 @@ For example:
 ```live:eg/defaultfunc:module:read_only
 default clamp_positive(_) := 0
 
-clamp_positive(x) = x {
+clamp_positive(x) := x if {
     x > 0
 }
 ```
@@ -2137,6 +2111,12 @@ function satisfies the following properties:
 * same arity as other functions with the same name
 * arguments should only be plain variables ie. no composite values
 * argument names should not be repeated
+
+{{< info >}}
+A `default` function will still fail (as in not evaluate, even to the default value) if any of the arguments provided in
+the call are **undefined**. The reason for this is that the arguments are evaluated before the function is even called,
+and an undefined argument halts evaluation at that point.
+{{< /info >}}
 
 ## Else Keyword
 
@@ -2207,7 +2187,7 @@ limit imposed on the number of `else` clauses on a rule.
 {{< info >}}
 To ensure backwards-compatibility, new keywords (like `in`) are introduced slowly.
 In the first stage, users can opt-in to using the new keywords via a special import:
-`import future.keywords.in` introduces the `in` keyword described here.
+`import rego.v1` or, alternatively, `import future.keywords.in` introduces the `in` keyword described here.
 
 [See the docs on _future keywords_](#future-keywords) for more information.
 {{< /info >}}
@@ -2215,8 +2195,6 @@ In the first stage, users can opt-in to using the new keywords via a special imp
 The membership operator `in` lets you check if an element is part of a collection (array, set, or object). It always evaluates to `true` or `false`:
 
 ```live:eg/member1:module:merge_down
-import future.keywords.in
-
 p := [x, y, z] if {
     x := 3 in [1, 2, 3]            # array
     y := 3 in {1, 2, 3}            # set
@@ -2232,8 +2210,6 @@ and an object or an array on the right-hand side, the first argument is
 taken to be the key (object) or index (array), respectively:
 
 ```live:eg/member1c:module:merge_down
-import future.keywords.in
-
 p := [x, y] if {
     x := "foo", "bar" in {"foo": "bar"}    # key, val with object
     y := 2, "baz" in ["foo", "bar", "baz"] # key, val with array
@@ -2248,8 +2224,6 @@ arguments, parentheses are required to use the form with two left-hand side
 arguments -- compare:
 
 ```live:eg/member1d:module:merge_down
-import future.keywords.in
-
 p := x if {
     x := { 0, 2 in [2] }
 }
@@ -2274,11 +2248,9 @@ Combined with `not`, the operator can be handy when asserting that an element is
 member of an array:
 
 ```live:eg/member1a:module:merge_down
-import future.keywords.in
-
 deny if not "admin" in input.user.roles
 
-test_deny {
+test_deny if {
     deny with input.user.roles as ["operator", "user"]
 }
 ```
@@ -2290,8 +2262,6 @@ test_deny {
 when called in non-collection arguments:
 
 ```live:eg/member1b:module:merge_down
-import future.keywords.in
-
 q := x if {
     x := 3 in "three"
 }
@@ -2303,18 +2273,16 @@ q := x if {
 Using the `some` variant, it can be used to introduce new variables based on a collections' items:
 
 ```live:eg/member2:module:merge_down
-import future.keywords.in
-
-p[x] {
-    some x in ["a", "r", "r", "a", "y"]
+p contains x if {
+	some x in ["a", "r", "r", "a", "y"]
 }
 
-q[x] {
-    some x in {"s", "e", "t"}
+q contains x if {
+	some x in {"s", "e", "t"}
 }
 
-r[x] {
-    some x in {"foo": "bar", "baz": "quz"}
+r contains x if {
+	some x in {"foo": "bar", "baz": "quz"}
 }
 ```
 
@@ -2324,18 +2292,16 @@ r[x] {
 Furthermore, passing a second argument allows you to work with _object keys_ and _array indices_:
 
 ```live:eg/member3:module:merge_down
-import future.keywords.in
-
-p[x] {
-    some x, "r" in ["a", "r", "r", "a", "y"] # key variable, value constant
+p contains x if {
+	some x, "r" in ["a", "r", "r", "a", "y"] # key variable, value constant
 }
 
-q[x] = y if {
-     some x, y in ["a", "r", "r", "a", "y"] # both variables
+q[x] := y if {
+	some x, y in ["a", "r", "r", "a", "y"] # both variables
 }
 
-r[y] = x if {
-    some x, y in {"foo": "bar", "baz": "quz"}
+r[y] := x if {
+	some x, y in {"foo": "bar", "baz": "quz"}
 }
 ```
 
@@ -2345,8 +2311,6 @@ r[y] = x if {
 Any argument to the `some` variant can be a composite, non-ground value:
 
 ```live:eg/member4:module:merge_down
-import future.keywords.in
-
 p[x] = y if {
     some x, {"foo": y} in [{"foo": 100}, {"bar": 200}]
 }
@@ -2675,7 +2639,7 @@ The package and individual rules in a module can be annotated with a rich set of
 # authors:
 # - John Doe <john@example.com>
 # entrypoint: true
-allow {
+allow if {
   ...
 }
 ```
@@ -2696,7 +2660,7 @@ comment block containing the YAML document is finished
 
 Name | Type | Description
 --- | --- | ---
-scope | string; one of `package`, `rule`, `document`, `subpackages` | The scope on which the `schemas` annotation is applied. Read more [here](./#scope).
+scope | string; one of `package`, `rule`, `document`, `subpackages` | The scope for which the metadata applies. Read more [here](./#scope).
 title | string | A human-readable name for the annotation target. Read more [here](#title).
 description | string | A description of the annotation target. Read more [here](#description).
 related_resources | list of URLs | A list of URLs pointing to related resources/documentation. Read more [here](#related-resources).
@@ -2723,8 +2687,12 @@ Since the `document` scope annotation applies to all rules with the same name in
 and the `package` and `subpackages` scope annotations apply to all packages with a matching path, metadata blocks with
 these scopes are applied over all files with applicable package- and rule paths.
 As there is no ordering across files in the same package, the `document`, `package`, and `subpackages` scope annotations
-can only be specified **once** per path.
-The `document` scope annotation can be applied to any rule in the set (i.e., ordering does not matter.)
+can only be specified **once** per path. The `document` scope annotation can be applied to any rule in the set (i.e.,
+ordering does not matter.)
+
+An `entrypoint` annotation implies a `scope` of either `package` or `document`. When `entrypoint` is set to `true` on a
+rule, the `scope` is automatically set to `document` if not explicitly provided. Setting the `scope` to `rule` will
+result in an error, as an entrypoint always applies to the whole document.
 
 #### Example
 
@@ -2735,15 +2703,22 @@ The `document` scope annotation can be applied to any rule in the set (i.e., ord
 
 # METADATA
 # title: Allow Ones
-allow {
+allow if {
     x == 1
 }
 
 # METADATA
 # title: Allow Twos
-allow {
+allow if {
     x == 2
 }
+
+# METADATA
+# entrypoint: true
+# description: |
+#   `scope` annotation automatically set to `document`
+#   as that is required for entrypoints
+message := "welcome!" if allow
 ```
 
 ### Title
@@ -2755,13 +2730,13 @@ The `title` annotation is a string value giving a human-readable name to the ann
 ```live:rego/metadata/title:module:read_only
 # METADATA
 # title: Allow Ones
-allow {
+allow if {
   x == 1
 }
 
 # METADATA
 # title: Allow Twos
-allow {
+allow if {
   x == 2
 }
 ```
@@ -2778,7 +2753,7 @@ The `description` annotation is a string value describing the annotation target,
 #  The 'allow' rule...
 #  Is about allowing things.
 #  Not denying them.
-allow {
+allow if {
   ...
 }
 ```
@@ -2808,7 +2783,7 @@ When a _related-resource_ entry is presented as a string, it needs to be a valid
 # ...
 # - ref: https://example.com/foo
 #   description: A text describing this resource
-allow {
+allow if {
   ...
 }
 ```
@@ -2819,7 +2794,7 @@ allow {
 # - https://example.com/foo
 # ...
 # - https://example.com/bar
-allow {
+allow if {
   ...
 }
 ```
@@ -2853,7 +2828,7 @@ Optionally, the last word may represent an email, if enclosed with `<>`.
 # ...
 # - name: Jane Doe
 #   email: jane@example.com
-allow {
+allow if {
   ...
 }
 ```
@@ -2864,7 +2839,7 @@ allow {
 # - John Doe
 # ...
 # - Jane Doe <jane@example.com>
-allow {
+allow if {
   ...
 }
 ```
@@ -2881,7 +2856,7 @@ The `organizations` annotation is a list of string values representing the organ
 # - Acme Corp.
 # ...
 # - Tyrell Corp.
-allow {
+allow if {
   ...
 }
 ```
@@ -2889,7 +2864,7 @@ allow {
 ### Schemas
 
 The `schemas` annotation is a list of key value pairs, associating schemas to data values.
-In-depth information on this topic can be found [here](../schemas#schema-annotations).
+In-depth information on this topic can be found [here](#annotations).
 
 #### Schema Reference Format
 
@@ -2902,7 +2877,7 @@ If the `--schema` flag is not present, referenced schemas are ignored during typ
 # schemas:
 #   - input: schema.input
 #   - data.acl: schema["acl-schema"]
-allow {
+allow if {
     access := data.acl["alice"]
     access[_] == input.operation
 }
@@ -2918,7 +2893,7 @@ in contrast to [by-reference schema annotations](#schema-reference-format), whic
 # METADATA
 # schemas:
 #   - input.x: {type: number}
-allow {
+allow if {
     input.x == 42
 }
 ```
@@ -2926,7 +2901,8 @@ allow {
 ### Entrypoint
 
 The `entrypoint` annotation is a boolean used to mark rules and packages that should be used as entrypoints for a policy.
-This value is false by default, and can only be used at `rule` or `package` scope.
+This value is false by default, and can only be used at `document` or `package` scope. When used on a rule with no
+explicit `scope` set, the presence of an `entrypoint` annotation will automatically set the scope to `document`.
 
 The `build` and `eval` CLI commands will automatically pick up annotated entrypoints; you do not have to specify them with
 [`--entrypoint`](../cli/#options-1).
@@ -2954,7 +2930,7 @@ The `custom` annotation is a mapping of user-defined data, mapping string keys t
 #  my_map:
 #   a: 1
 #   b: 2
-allow {
+allow if {
   ...
 }
 ```
@@ -2982,19 +2958,21 @@ The following policy
 ```live:example/metadata/1:module
 package example
 
+import rego.v1
+
 # METADATA
 # title: Deny invalid numbers
 # description: Numbers may not be higher than 5
 # custom:
 #  severity: MEDIUM
-output := decision {
- input.number > 5
+output := decision if {
+	input.number > 5
 
- annotation := rego.metadata.rule()
- decision := {
-  "severity": annotation.custom.severity,
-  "message": annotation.description,
- }
+	annotation := rego.metadata.rule()
+	decision := {
+		"severity": annotation.custom.severity,
+		"message": annotation.description,
+	}
 }
 ```
 
@@ -3064,7 +3042,7 @@ for _, entry := range flattened {
 // # METADATA
 // # description: A couple of useful rules
 // package foo.bar
-// 
+//
 // # METADATA
 // # title: My Rule P
 // p := 7
@@ -3099,7 +3077,7 @@ for _, link := range chain {
 // # METADATA
 // # description: A couple of useful rules
 // package foo.bar
-// 
+//
 // # METADATA
 // # title: My Rule P
 // p := 7
@@ -3161,11 +3139,13 @@ starts with a specific prefix.
 ```
 package kubernetes.admission
 
-deny[msg] {
-    input.request.kind.kinds == "Pod"
-    image := input.request.object.spec.containers[_].image
-    not startswith(image, "hooli.com/")
-    msg := sprintf("image '%v' comes from untrusted registry", [image])
+import rego.v1
+
+deny contains msg if {
+	input.request.kind.kinds == "Pod"
+	image := input.request.object.spec.containers[_].image
+	not startswith(image, "hooli.com/")
+	msg := sprintf("image '%v' comes from untrusted registry", [image])
 }
 ```
 
@@ -3253,7 +3233,7 @@ When passing a directory of schemas to `opa eval`, schema annotations become han
 #   - <path-to-value>:<path-to-schema>
 #   ...
 #   - <path-to-value>:<path-to-schema>
-allow {
+allow if {
   ...
 }
 ```
@@ -3271,6 +3251,8 @@ Consider the following Rego code which checks if an operation is allowed by a us
 ```
 package policy
 
+import rego.v1
+
 import data.acl
 
 default allow := false
@@ -3279,14 +3261,14 @@ default allow := false
 # schemas:
 #   - input: schema.input
 #   - data.acl: schema["acl-schema"]
-allow {
-    access := data.acl["alice"]
-    access[_] == input.operation
+allow if {
+	access := data.acl.alice
+	access[_] == input.operation
 }
 
-allow {
-    access := data.acl["bob"]
-    access[_] == input.operation
+allow if {
+	access := data.acl.bob
+	access[_] == input.operation
 }
 ```
 
@@ -3337,7 +3319,7 @@ annotation multiple times:
 # schemas:
 #   - input: schema.input
 #   - data.acl: schema["acl-schema"]
-allow {
+allow if {
     access := data.acl["alice"]
     access[_] == input.operation
 }
@@ -3347,7 +3329,7 @@ allow {
 # schemas:
 #   - input: schema.input
 #   - data.acl: schema["acl-schema"]
-allow {
+allow if {
     access := data.acl["bob"]
     access[_] == input.operation
 }
@@ -3362,12 +3344,12 @@ define the annotation once on a rule with scope `document`:
 # schemas:
 #   - input: schema.input
 #   - data.acl: schema["acl-schema"]
-allow {
+allow if {
     access := data.acl["alice"]
     access[_] == input.operation
 }
 
-allow {
+allow if {
     access := data.acl["bob"]
     access[_] == input.operation
 }
@@ -3389,12 +3371,14 @@ within the package:
 #   - data.acl: schema["acl-schema"]
 package example
 
-allow {
+import rego.v1
+
+allow if {
     access := data.acl["alice"]
     access[_] == input.operation
 }
 
-allow {
+allow if {
     access := data.acl["bob"]
     access[_] == input.operation
 }
@@ -3427,16 +3411,18 @@ Consider the following example:
 ```
 package kubernetes.admission
 
+import rego.v1
+
 # METADATA
 # scope: rule
 # schemas:
 # - input: schema.input
 # - input.request.object: schema.kubernetes.pod
-deny[msg] {
-    input.request.kind.kind == "Pod"
-    image := input.request.object.spec.containers[_].image
-    not startswith(image, "hooli.com/")
-    msg := sprintf("image '%v' comes from untrusted registry", [image])
+deny contains msg if {
+	input.request.kind.kind == "Pod"
+	image := input.request.object.spec.containers[_].image
+	not startswith(image, "hooli.com/")
+	msg := sprintf("image '%v' comes from untrusted registry", [image])
 }
 ```
 
@@ -3487,6 +3473,8 @@ It is sometimes useful to have different input schemas for different rules in th
 ```
 package policy
 
+import rego.v1
+
 import data.acl
 
 default allow := false
@@ -3496,9 +3484,9 @@ default allow := false
 # schemas:
 #  - input: schema["input"]
 #  - data.acl: schema["acl-schema"]
-allow {
-    access := data.acl[input.user]
-    access[_] == input.operation
+allow if {
+	access := data.acl[input.user]
+	access[_] == input.operation
 }
 
 # METADATA for whocan rule
@@ -3506,9 +3494,9 @@ allow {
 # schemas:
 #   - input: schema["whocan-input-schema"]
 #   - data.acl: schema["acl-schema"]
-whocan[user] {
-    access := acl[user]
-    access[_] == input.operation
+whocan contains user if {
+	access := acl[user]
+	access[_] == input.operation
 }
 ```
 
@@ -3545,12 +3533,14 @@ Specifically, `anyOf` acts as an Rego Or type where at least one (can be more th
 ```
 package kubernetes.admission
 
+import rego.v1
+
 # METADATA
 # scope: rule
 # schemas:
 #   - input: schema["input-anyOf"]
-deny {
-    input.request.servers.versions == "Pod"
+deny if {
+	input.request.servers.versions == "Pod"
 }
 ```
 
@@ -3626,12 +3616,14 @@ Specifically, `allOf` keyword implies that all conditions under `allOf` within a
 ```
 package kubernetes.admission
 
+import rego.v1
+
 # METADATA
 # scope: rule
 # schemas:
 #   - input: schema["input-allof"]
-deny {
-    input.request.servers.versions == "Pod"
+deny if {
+	input.request.servers.versions == "Pod"
 }
 ```
 
@@ -3786,7 +3778,7 @@ The Rego compiler supports `strict mode`, where additional constraints and safet
 Compiler rules that will be enforced by future versions of OPA, but will be a breaking change once introduced, are incubated in strict mode.
 This creates an opportunity for users to verify that their policies are compatible with the next version of OPA before upgrading.
 
-Compiler Strict mode is supported by the `check` command, and can be enabled through the `-S` flag.
+Compiler Strict mode is supported by the `check` command, and can be enabled through the `--strict`/`-S` flag.
 
 ```
 -S, --strict enable compiler strict mode
@@ -3797,10 +3789,62 @@ Compiler Strict mode is supported by the `check` command, and can be enabled thr
 Name | Description                                                                                                                                                                                                                                                    | Enforced by default in OPA version
 --- |----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------| ---
 Duplicate imports | Duplicate [imports](../policy-language/#imports), where one import shadows another, are prohibited.                                                                                                                                                            | 1.0
-Unused local assignments | Unused arguments or [assignments](../policy-reference/#assignment-and-equality) local to a rule, function or comprehension are prohibited                                                                                                                                   | 1.0
-Unused imports | Unused [imports](../policy-language/#imports) are prohibited.                                                                                                                                                                                                  | 1.0
+Unused local assignments | Unused arguments or [assignments](../policy-reference/#assignment-and-equality) local to a rule, function or comprehension are prohibited                                                                                                                                   |
+Unused imports | Unused [imports](../policy-language/#imports) are prohibited.                                                                                                                                                                                                  |
 `input` and `data` reserved keywords | `input` and `data` are reserved keywords, and may not be used as names for rules and variable assignment.                                                                                                                                                      | 1.0
 Use of deprecated built-ins | Use of deprecated functions is prohibited, and these will be removed in OPA 1.0. Deprecated built-in functions: `any`, `all`, `re_match`,  `net.cidr_overlap`, `set_diff`, `cast_array`, `cast_set`, `cast_string`, `cast_boolean`, `cast_null`, `cast_object` | 1.0
+
+{{< info >}}
+If the `rego.v1` import is present in a module, all strict mode checks documented above except the unused local assignment and unused imports checks are enforced on the module.
+
+Additionally the `rego.v1` import also requires the usage of `if` and `contains` keywords when declaring certain rules. The `if` keyword is required before a rule body and the `contains` keyword is required for partial set rules.
+{{< /info >}}
+
+## The `rego.v1` Import
+
+In the future, when [OPA v1.0](../opa-1) is released, breaking changes will be introduced to the Rego language.
+The `rego.v1` import is a way to opt-in to these breaking changes early, and ensure that your policies are compatible with OPA v1.0.
+If a module containing this import is not compatible with OPA v1.0, it will cause a compilation error.
+
+When a module imports `rego.v1`, the following features and constraints are implied:
+
+* all [Future keywords](#future-keywords) are implied and can be used without import.
+  These imports are mutually exclusive, and it will cause a compilation error to import both `rego.v1` and `future.keywords` in the same module.
+* the [if](#futurekeywordsif) keyword is required before a rule body declaration.
+* the [contains](#futurekeywordscontains) keyword is required for partial set (multi-value) rules.
+* most [Strict mode](#strict-mode) constraints and checks are implied and enforced. See the strict mode [constraints and checks table](#strict-mode-constraints-and-checks) for details.
+
+The `rego.v1` import only affects the module where it's declared. It does not affect any other modules, even if they are importing, or is imported by, a module where `rego.v1` is declared.
+
+In OPA v1.0, the `rego.v1` import will have no semantic impact on the policy, as all its implied features and constraints will be enforced by default. It will however still be a valid statement, and won't cause any compilation errors.
+
+Example policy that imports `rego.v1` to be compatible with the future syntax in OPA v1.0:
+
+```live:rego_v1:module:read_only
+package example
+
+import rego.v1
+
+l := [1, 2, 3]
+
+default allow := false
+
+# 'if' is part of default v1.0 syntax, and doesn't need import.
+# 'if' is required before rule body.
+allow if {
+  count(violations) == 0
+}
+
+# 'contains' is part of default v1.0 syntax, and doesn't need import.
+# 'contains' is required to declare multi-value, partial set rule.
+violations contains msg if {
+  # 'every' and 'in' are part of default v1.0 syntax, and doesn't need imports.
+  every x in l {
+    x > 0
+  }
+  msg := "no negative entries"
+}
+```
 
 ## Ecosystem Projects
 

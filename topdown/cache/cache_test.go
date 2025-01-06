@@ -5,9 +5,11 @@
 package cache
 
 import (
+	"context"
 	"reflect"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/open-policy-agent/opa/ast"
 )
@@ -15,7 +17,15 @@ import (
 func TestParseCachingConfig(t *testing.T) {
 	maxSize := new(int64)
 	*maxSize = defaultMaxSizeBytes
-	expected := &Config{InterQueryBuiltinCache: InterQueryBuiltinCacheConfig{MaxSizeBytes: maxSize}}
+	period := new(int64)
+	*period = defaultStaleEntryEvictionPeriodSeconds
+	threshold := new(int64)
+	*threshold = defaultForcedEvictionThresholdPercentage
+	maxNumEntriesInterQueryValueCache := new(int)
+	*maxNumEntriesInterQueryValueCache = defaultInterQueryBuiltinValueCacheSize
+
+	expected := &Config{InterQueryBuiltinCache: InterQueryBuiltinCacheConfig{MaxSizeBytes: maxSize, StaleEntryEvictionPeriodSeconds: period, ForcedEvictionThresholdPercentage: threshold},
+		InterQueryBuiltinValueCache: InterQueryBuiltinValueCacheConfig{MaxNumEntries: maxNumEntriesInterQueryValueCache}}
 
 	tests := map[string]struct {
 		input   []byte
@@ -29,8 +39,16 @@ func TestParseCachingConfig(t *testing.T) {
 			input:   []byte(`{"inter_query_builtin_cache": {},}`),
 			wantErr: false,
 		},
+		"default_num_entries": {
+			input:   []byte(`{"inter_query_builtin_value_cache": {},}`),
+			wantErr: false,
+		},
 		"bad_limit": {
 			input:   []byte(`{"inter_query_builtin_cache": {"max_size_bytes": "100"},}`),
+			wantErr: true,
+		},
+		"bad_num_entries": {
+			input:   []byte(`{"inter_query_builtin_value_cache": {"max_num_entries": "100"},}`),
 			wantErr: true,
 		},
 	}
@@ -159,6 +177,97 @@ func TestInsert(t *testing.T) {
 	}
 }
 
+func TestInterQueryValueCache(t *testing.T) {
+
+	in := `{"inter_query_builtin_value_cache": {"max_num_entries": 4},}`
+
+	config, err := ParseCachingConfig([]byte(in))
+	if err != nil {
+		t.Fatalf("Unexpected error %v", err)
+	}
+
+	cache := NewInterQueryValueCache(context.Background(), config)
+
+	cache.Insert(ast.StringTerm("foo").Value, "bar")
+	cache.Insert(ast.StringTerm("foo2").Value, "bar2")
+	cache.Insert(ast.StringTerm("hello").Value, "world")
+	dropped := cache.Insert(ast.StringTerm("hello2").Value, "world2")
+
+	if dropped != 0 {
+		t.Fatal("Expected dropped to be zero")
+	}
+
+	value, found := cache.Get(ast.StringTerm("foo").Value)
+	if !found {
+		t.Fatal("Expected key \"foo\" in cache")
+	}
+
+	actual, ok := value.(string)
+	if !ok {
+		t.Fatal("Expected string value")
+	}
+
+	if actual != "bar" {
+		t.Fatalf("Expected value \"bar\" but got %v", actual)
+	}
+
+	dropped = cache.Insert(ast.StringTerm("foo3").Value, "bar3")
+	if dropped != 1 {
+		t.Fatal("Expected dropped to be one")
+	}
+
+	_, found = cache.Get(ast.StringTerm("foo3").Value)
+	if !found {
+		t.Fatal("Expected key \"foo3\" in cache")
+	}
+
+	// update the cache config
+	in = `{"inter_query_builtin_value_cache": {"max_num_entries": 0},}` // unlimited
+	config, err = ParseCachingConfig([]byte(in))
+	if err != nil {
+		t.Fatalf("Unexpected error %v", err)
+	}
+
+	cache.UpdateConfig(config)
+
+	cache.Insert(ast.StringTerm("a").Value, "b")
+	cache.Insert(ast.StringTerm("c").Value, "d")
+	cache.Insert(ast.StringTerm("e").Value, "f")
+	dropped = cache.Insert(ast.StringTerm("g").Value, "h")
+
+	if dropped != 0 {
+		t.Fatal("Expected dropped to be zero")
+	}
+
+	// at this point the cache should have 8 entries
+	// update the cache size and verify multiple items dropped
+	in = `{"inter_query_builtin_value_cache": {"max_num_entries": 6},}`
+	config, err = ParseCachingConfig([]byte(in))
+	if err != nil {
+		t.Fatalf("Unexpected error %v", err)
+	}
+
+	cache.UpdateConfig(config)
+
+	dropped = cache.Insert(ast.StringTerm("i").Value, "j")
+
+	if dropped != 3 {
+		t.Fatal("Expected dropped to be three")
+	}
+
+	_, found = cache.Get(ast.StringTerm("i").Value)
+	if !found {
+		t.Fatal("Expected key \"i\" in cache")
+	}
+
+	cache.Delete(ast.StringTerm("i").Value)
+
+	_, found = cache.Get(ast.StringTerm("i").Value)
+	if found {
+		t.Fatal("Unexpected key \"i\" in cache")
+	}
+}
+
 func TestConcurrentInsert(t *testing.T) {
 	in := `{"inter_query_builtin_cache": {"max_size_bytes": 20},}` // 20 byte limit for test purposes
 
@@ -277,6 +386,184 @@ func TestDelete(t *testing.T) {
 	verifyCacheList(t, cache)
 }
 
+func TestInsertWithExpiryAndEviction(t *testing.T) {
+	// 50 byte max size
+	// 1s stale cleanup period
+	// 80% threshold to for FIFO eviction (eviction after 40 bytes)
+	in := `{"inter_query_builtin_cache": {"max_size_bytes": 50, "stale_entry_eviction_period_seconds": 1, "forced_eviction_threshold_percentage": 80},}`
+
+	config, err := ParseCachingConfig([]byte(in))
+	if err != nil {
+		t.Fatalf("Unexpected error %v", err)
+	}
+
+	cache := NewInterQueryCacheWithContext(context.Background(), config)
+
+	cacheValue := newInterQueryCacheValue(ast.StringTerm("bar").Value, 20)
+	cache.InsertWithExpiry(ast.StringTerm("force_evicted_foo").Value, cacheValue, time.Now().Add(100*time.Second))
+	if fetchedCacheValue, found := cache.Get(ast.StringTerm("force_evicted_foo").Value); !found {
+		t.Fatalf("Expected cache entry with value %v, found %v", cacheValue, fetchedCacheValue)
+	}
+	cache.InsertWithExpiry(ast.StringTerm("expired_foo").Value, cacheValue, time.Now().Add(1*time.Second))
+	if fetchedCacheValue, found := cache.Get(ast.StringTerm("expired_foo").Value); !found {
+		t.Fatalf("Expected cache entry with value %v, found %v", cacheValue, fetchedCacheValue)
+	}
+	cache.InsertWithExpiry(ast.StringTerm("foo").Value, cacheValue, time.Now().Add(10*time.Second))
+	if fetchedCacheValue, found := cache.Get(ast.StringTerm("foo").Value); !found {
+		t.Fatalf("Expected cache entry with value %v, found %v", cacheValue, fetchedCacheValue)
+	}
+
+	// Ensure stale entries clean up routine runs at least once
+	time.Sleep(2 * time.Second)
+
+	// Entry deleted even though not expired because force evicted when foo is inserted
+	if fetchedCacheValue, found := cache.Get(ast.StringTerm("force_evicted_foo").Value); found {
+		t.Fatalf("Didn't expect cache entry for force_evicted_foo, found entry with value %v", fetchedCacheValue)
+	}
+	// Stale clean up routine runs and deletes expired entry
+	if fetchedCacheValue, found := cache.Get(ast.StringTerm("expired_foo").Value); found {
+		t.Fatalf("Didn't expect cache entry for expired_foo, found entry with value %v", fetchedCacheValue)
+	}
+	// Stale clean up routine runs but doesn't delete the entry
+	if fetchedCacheValue, found := cache.Get(ast.StringTerm("foo").Value); !found {
+		t.Fatalf("Expected cache entry with value %v for foo, found %v", cacheValue, fetchedCacheValue)
+	}
+}
+
+func TestInsertHighTTLWithStaleEntryCleanup(t *testing.T) {
+	// 40 byte max size
+	// 1s stale cleanup period
+	// 100% threshold to for FIFO eviction (eviction after 40 bytes)
+	in := `{"inter_query_builtin_cache": {"max_size_bytes": 40, "stale_entry_eviction_period_seconds": 1, "forced_eviction_threshold_percentage": 100},}`
+
+	config, err := ParseCachingConfig([]byte(in))
+	if err != nil {
+		t.Fatalf("Unexpected error %v", err)
+	}
+
+	cache := NewInterQueryCacheWithContext(context.Background(), config)
+
+	cacheValue := newInterQueryCacheValue(ast.StringTerm("bar").Value, 20)
+	cache.InsertWithExpiry(ast.StringTerm("high_ttl_foo").Value, cacheValue, time.Now().Add(100*time.Second))
+	if fetchedCacheValue, found := cache.Get(ast.StringTerm("high_ttl_foo").Value); !found {
+		t.Fatalf("Expected cache entry with value %v, found %v", cacheValue, fetchedCacheValue)
+	}
+	cache.InsertWithExpiry(ast.StringTerm("expired_foo").Value, cacheValue, time.Now().Add(1*time.Second))
+	if fetchedCacheValue, found := cache.Get(ast.StringTerm("expired_foo").Value); !found {
+		t.Fatalf("Expected cache entry with value %v, found no entry", fetchedCacheValue)
+	}
+
+	// Ensure stale entries clean up routine runs at least once
+	time.Sleep(2 * time.Second)
+
+	cache.InsertWithExpiry(ast.StringTerm("foo").Value, cacheValue, time.Now().Add(10*time.Second))
+	if fetchedCacheValue, found := cache.Get(ast.StringTerm("foo").Value); !found {
+		t.Fatalf("Expected cache entry with value %v, found %v", cacheValue, fetchedCacheValue)
+	}
+
+	// Since expired_foo is deleted by stale cleanup routine, high_ttl_foo is not evicted when foo is inserted
+	if fetchedCacheValue, found := cache.Get(ast.StringTerm("high_ttl_foo").Value); !found {
+		t.Fatalf("Expected cache entry with value %v for high_ttl_foo, found %v", cacheValue, fetchedCacheValue)
+	}
+	// Stale clean up routine runs and deletes expired entry
+	if fetchedCacheValue, found := cache.Get(ast.StringTerm("expired_foo").Value); found {
+		t.Fatalf("Didn't expect cache entry for expired_foo, found entry with value %v", fetchedCacheValue)
+	}
+}
+
+func TestInsertHighTTLWithoutStaleEntryCleanup(t *testing.T) {
+	// 40 byte max size
+	// 0s stale cleanup period -> no cleanup
+	// 100% threshold to for FIFO eviction (eviction after 40 bytes)
+	in := `{"inter_query_builtin_cache": {"max_size_bytes": 40, "stale_entry_eviction_period_seconds": 0, "forced_eviction_threshold_percentage": 100},}`
+
+	config, err := ParseCachingConfig([]byte(in))
+	if err != nil {
+		t.Fatalf("Unexpected error %v", err)
+	}
+
+	cache := NewInterQueryCacheWithContext(context.Background(), config)
+
+	cacheValue := newInterQueryCacheValue(ast.StringTerm("bar").Value, 20)
+	cache.InsertWithExpiry(ast.StringTerm("high_ttl_foo").Value, cacheValue, time.Now().Add(100*time.Second))
+	if fetchedCacheValue, found := cache.Get(ast.StringTerm("high_ttl_foo").Value); !found {
+		t.Fatalf("Expected cache entry with value %v for high_ttl_foo, found no entry", fetchedCacheValue)
+	}
+	cache.InsertWithExpiry(ast.StringTerm("expired_foo").Value, cacheValue, time.Now().Add(1*time.Second))
+	if fetchedCacheValue, found := cache.Get(ast.StringTerm("expired_foo").Value); !found {
+		t.Fatalf("Expected cache entry with value %v for expired_foo, found no entry", fetchedCacheValue)
+	}
+
+	cache.InsertWithExpiry(ast.StringTerm("foo").Value, cacheValue, time.Now().Add(10*time.Second))
+	if fetchedCacheValue, found := cache.Get(ast.StringTerm("foo").Value); !found {
+		t.Fatalf("Expected cache entry with value %v for foo, found no entry", fetchedCacheValue)
+	}
+
+	// Since stale cleanup routine is disabled, high_ttl_foo is evicted when foo is inserted
+	if fetchedCacheValue, found := cache.Get(ast.StringTerm("high_ttl_foo").Value); found {
+		t.Fatalf("Didn't expect cache entry for high_ttl_foo, found entry with value %v", fetchedCacheValue)
+	}
+	// Stale clean up disabled so expired entry exists
+	if fetchedCacheValue, found := cache.Get(ast.StringTerm("expired_foo").Value); !found {
+		t.Fatalf("Expected cache entry with value %v for expired_foo, found %v", cacheValue, fetchedCacheValue)
+	}
+}
+
+func TestZeroExpiryTime(t *testing.T) {
+	// 20 byte max size
+	// 1s stale cleanup period
+	// 100% threshold to for FIFO eviction (eviction after 40 bytes)
+	in := `{"inter_query_builtin_cache": {"max_size_bytes": 20, "stale_entry_eviction_period_seconds": 1, "forced_eviction_threshold_percentage": 100},}`
+
+	config, err := ParseCachingConfig([]byte(in))
+	if err != nil {
+		t.Fatalf("Unexpected error %v", err)
+	}
+
+	cache := NewInterQueryCacheWithContext(context.Background(), config)
+	cacheValue := newInterQueryCacheValue(ast.StringTerm("bar").Value, 20)
+	cache.InsertWithExpiry(ast.StringTerm("foo").Value, cacheValue, time.Time{})
+	if fetchedCacheValue, found := cache.Get(ast.StringTerm("foo").Value); !found {
+		t.Fatalf("Expected cache entry with value %v for foo, found %v", cacheValue, fetchedCacheValue)
+	}
+
+	time.Sleep(2 * time.Second)
+
+	// Stale entry cleanup routine skips zero time cache entries
+	if fetchedCacheValue, found := cache.Get(ast.StringTerm("foo").Value); !found {
+		t.Fatalf("Expected cache entry with value %v for foo, found %v", cacheValue, fetchedCacheValue)
+	}
+}
+
+func TestCancelNewInterQueryCacheWithContext(t *testing.T) {
+	// 40 byte max size
+	// 1s stale cleanup period
+	// 100% threshold to for FIFO eviction (eviction after 40 bytes)
+	in := `{"inter_query_builtin_cache": {"max_size_bytes": 40, "stale_entry_eviction_period_seconds": 1, "forced_eviction_threshold_percentage": 100},}`
+
+	config, err := ParseCachingConfig([]byte(in))
+	if err != nil {
+		t.Fatalf("Unexpected error %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cache := NewInterQueryCacheWithContext(ctx, config)
+	cacheValue := newInterQueryCacheValue(ast.StringTerm("bar").Value, 20)
+	cache.InsertWithExpiry(ast.StringTerm("foo").Value, cacheValue, time.Now().Add(100*time.Millisecond))
+	if fetchedCacheValue, found := cache.Get(ast.StringTerm("foo").Value); !found {
+		t.Fatalf("Expected cache entry with value %v for foo, found %v", cacheValue, fetchedCacheValue)
+	}
+
+	cancel()
+	time.Sleep(2 * time.Second)
+
+	// Stale entry cleanup routine stopped as context was cancelled
+	if fetchedCacheValue, found := cache.Get(ast.StringTerm("foo").Value); !found {
+		t.Fatalf("Expected cache entry with value %v for foo, found %v", cacheValue, fetchedCacheValue)
+	}
+
+}
+
 func TestUpdateConfig(t *testing.T) {
 	config, err := ParseCachingConfig(nil)
 	if err != nil {
@@ -304,7 +591,7 @@ func TestUpdateConfig(t *testing.T) {
 	}
 }
 
-func TestDefaultMaxSizeBytes(t *testing.T) {
+func TestDefaultConfigValues(t *testing.T) {
 	c := NewInterQueryCache(nil)
 	actualC, ok := c.(*cache)
 	if !ok {
@@ -312,6 +599,12 @@ func TestDefaultMaxSizeBytes(t *testing.T) {
 	}
 	if actualC.maxSizeBytes() != defaultMaxSizeBytes {
 		t.Fatal("Expected maxSizeBytes() to return default when config is nil")
+	}
+	if actualC.forcedEvictionThresholdPercentage() != defaultForcedEvictionThresholdPercentage {
+		t.Fatal("Expected forcedEvictionThresholdPercentage() to return default when config is nil")
+	}
+	if actualC.staleEntryEvictionTimePeriodSeconds() != defaultStaleEntryEvictionPeriodSeconds {
+		t.Fatal("Expected staleEntryEvictionTimePeriodSeconds() to return default when config is nil")
 	}
 }
 

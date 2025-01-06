@@ -7,7 +7,9 @@ package cmd
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -27,6 +29,44 @@ func TestRunBenchmark(t *testing.T) {
 	params := testBenchParams()
 
 	args := []string{"1 + 1"}
+	var buf bytes.Buffer
+
+	rc, err := benchMain(args, params, &buf, &goBenchRunner{})
+	if err != nil {
+		t.Fatalf("Unexpected error: %s", err)
+	}
+
+	if rc != 0 {
+		t.Fatalf("Unexpected return code %d, expected 0", rc)
+	}
+
+	// Expect a json serialized benchmark result with histogram fields
+	var br testing.BenchmarkResult
+	err = util.UnmarshalJSON(buf.Bytes(), &br)
+	if err != nil {
+		t.Fatalf("Unexpected error unmarshalling output: %s", err)
+	}
+
+	if br.N == 0 || br.T == 0 || br.MemAllocs == 0 || br.MemBytes == 0 {
+		t.Fatalf("Expected benchmark results to be non-zero, got: %+v", br)
+	}
+
+	if _, ok := br.Extra["histogram_timer_rego_query_eval_ns_count"]; !ok {
+		t.Fatalf("Expected benchmark results to contain histogram_timer_rego_query_eval_ns_count, got: %+v", br)
+	}
+
+	if float64(br.N) != br.Extra["histogram_timer_rego_query_eval_ns_count"] {
+		t.Fatalf("Expected 'histogram_timer_rego_query_eval_ns_count' to be equal to N")
+	}
+}
+
+func TestRunBenchmarkWithQueryImport(t *testing.T) {
+	params := testBenchParams()
+	// We add the rego.v1 import ..
+	params.imports = newrepeatedStringFlag([]string{"rego.v1"})
+
+	// .. which provides the 'in' keyword
+	args := []string{`"a" in ["a", "b", "c"]`}
 	var buf bytes.Buffer
 
 	rc, err := benchMain(args, params, &buf, &goBenchRunner{})
@@ -342,7 +382,7 @@ func TestBenchMainErrRunningBenchmark(t *testing.T) {
 	var buf bytes.Buffer
 
 	mockRunner := &mockBenchRunner{}
-	mockRunner.onRun = func(ctx context.Context, ectx *evalContext, params benchmarkCommandParams, f func(context.Context, ...rego.EvalOption) error) (testing.BenchmarkResult, error) {
+	mockRunner.onRun = func(_ context.Context, _ *evalContext, _ benchmarkCommandParams, _ func(context.Context, ...rego.EvalOption) error) (testing.BenchmarkResult, error) {
 		return testing.BenchmarkResult{}, errors.New("error error error")
 	}
 
@@ -365,7 +405,7 @@ func TestBenchMainWithCount(t *testing.T) {
 
 	params.count = 25
 	actualCount := 0
-	mockRunner.onRun = func(ctx context.Context, ectx *evalContext, params benchmarkCommandParams, f func(context.Context, ...rego.EvalOption) error) (testing.BenchmarkResult, error) {
+	mockRunner.onRun = func(_ context.Context, _ *evalContext, _ benchmarkCommandParams, _ func(context.Context, ...rego.EvalOption) error) (testing.BenchmarkResult, error) {
 		actualCount++
 		return testing.BenchmarkResult{}, nil
 	}
@@ -393,7 +433,7 @@ func TestBenchMainWithNegativeCount(t *testing.T) {
 
 	params.count = -1
 	actualCount := 0
-	mockRunner.onRun = func(ctx context.Context, ectx *evalContext, params benchmarkCommandParams, f func(context.Context, ...rego.EvalOption) error) (testing.BenchmarkResult, error) {
+	mockRunner.onRun = func(_ context.Context, _ *evalContext, _ benchmarkCommandParams, _ func(context.Context, ...rego.EvalOption) error) (testing.BenchmarkResult, error) {
 		actualCount++
 		return testing.BenchmarkResult{}, nil
 	}
@@ -418,7 +458,7 @@ func validateBenchMainPrep(t *testing.T, args []string, params benchmarkCommandP
 
 	mockRunner := &mockBenchRunner{}
 
-	mockRunner.onRun = func(ctx context.Context, ectx *evalContext, params benchmarkCommandParams, f func(context.Context, ...rego.EvalOption) error) (testing.BenchmarkResult, error) {
+	mockRunner.onRun = func(ctx context.Context, ectx *evalContext, _ benchmarkCommandParams, _ func(context.Context, ...rego.EvalOption) error) (testing.BenchmarkResult, error) {
 
 		// cheat and use the ectx to evalute the query to ensure the input setup on it was valid
 		r := rego.New(ectx.regoArgs...)
@@ -688,6 +728,321 @@ func TestBenchMainBadQueryE2E(t *testing.T) {
 
 	if rc != 1 {
 		t.Fatalf("Unexpected return code %d, expected 1", rc)
+	}
+}
+
+func TestBenchMainV1Compatible(t *testing.T) {
+	tests := []struct {
+		note         string
+		v1Compatible bool
+		module       string
+		query        string
+		expErrs      []string
+	}{
+		// These tests are slow, so we're not being completely exhaustive here.
+		{
+			note: "v0.x, keywords not used",
+			module: `package test
+a[4] {
+	1 == 1
+}`,
+			query: `data.test.a`,
+		},
+		{
+			note: "v0.x, no keywords imported",
+			module: `package test
+a contains 4 if {
+	1 == 1
+}`,
+			query: `data.test.a`,
+			expErrs: []string{
+				"rego_parse_error: var cannot be used for rule name",
+				"rego_parse_error: number cannot be used for rule name",
+			},
+		},
+		{
+			note:         "v1.0, keywords not used",
+			v1Compatible: true,
+			module: `package test
+a[4] {
+	1 == 1
+}`,
+			query: `data.test.a`,
+			expErrs: []string{
+				"rego_parse_error: `if` keyword is required before rule body",
+				"rego_parse_error: `contains` keyword is required for partial set rules",
+			},
+		},
+		{
+			note:         "v1.0, no keywords imported",
+			v1Compatible: true,
+			module: `package test
+a contains 4 if {
+	1 == 1
+}`,
+			query: `data.test.a`,
+		},
+	}
+
+	modes := []struct {
+		name string
+		e2e  bool
+	}{
+		{
+			name: "run",
+		},
+		{
+			name: "e2e",
+			e2e:  true,
+		},
+	}
+
+	for _, mode := range modes {
+		for _, tc := range tests {
+			t.Run(fmt.Sprintf("%s, %s", tc.note, mode.name), func(t *testing.T) {
+				files := map[string]string{
+					"mod.rego": tc.module,
+				}
+
+				test.WithTempFS(files, func(path string) {
+					params := testBenchParams()
+					_ = params.outputFormat.Set(evalPrettyOutput)
+					params.v1Compatible = tc.v1Compatible
+					params.e2e = mode.e2e
+
+					for n := range files {
+						err := params.dataPaths.Set(filepath.Join(path, n))
+						if err != nil {
+							t.Fatalf("Unexpected error: %s", err)
+						}
+					}
+
+					args := []string{tc.query}
+
+					var buf bytes.Buffer
+					rc, err := benchMain(args, params, &buf, &goBenchRunner{})
+
+					if len(tc.expErrs) > 0 {
+						if rc == 0 {
+							t.Fatalf("Expected non-zero return code")
+						}
+
+						output := buf.String()
+						for _, expErr := range tc.expErrs {
+							if !strings.Contains(output, expErr) {
+								t.Fatalf("Expected error:\n\n%s\n\ngot:\n\n%s", expErr, output)
+							}
+						}
+					} else {
+						if err != nil {
+							t.Fatalf("Unexpected error: %s", err)
+						}
+						if rc != 0 {
+							t.Fatalf("Unexpected return code %d, expected 0", rc)
+						}
+					}
+				})
+			})
+		}
+	}
+}
+
+func TestBenchMainWithBundleRegoVersion(t *testing.T) {
+	tests := []struct {
+		note                   string
+		bundleRegoVersion      int
+		bundleFileRegoVersions map[string]int
+		modules                map[string]string
+		query                  string
+		expErrs                []string
+	}{
+		// These tests are slow, so we're not being completely exhaustive here.
+		{
+			note:              "v0 bundle",
+			bundleRegoVersion: 0,
+			modules: map[string]string{
+				"test.rego": `package test
+a[4] {
+	1 == 1
+}`,
+			},
+			query: `data.test.a`,
+		},
+		{
+			note:              "v0 bundle, no keywords imported",
+			bundleRegoVersion: 0,
+			modules: map[string]string{
+				"test.rego": `package test
+a contains 4 if {
+	1 == 1
+}`,
+			},
+			query: `data.test.a`,
+			expErrs: []string{
+				"rego_parse_error: var cannot be used for rule name",
+				"rego_parse_error: number cannot be used for rule name",
+			},
+		},
+		{
+			note:              "v0 bundle, v1 per-file override",
+			bundleRegoVersion: 0,
+			bundleFileRegoVersions: map[string]int{
+				"*/test2.rego": 1,
+			},
+			modules: map[string]string{
+				"test1.rego": `package test
+a[4] {
+	1 == 1
+}`,
+				"test2.rego": `package test
+b contains 4 if {
+	1 == 1
+}`,
+			},
+			query: `data.test.a`,
+		},
+		{
+			note:              "v1 bundle, keywords not used",
+			bundleRegoVersion: 1,
+			modules: map[string]string{
+				"test.rego": `package test
+a[4] {
+	1 == 1
+}`,
+			},
+			query: `data.test.a`,
+			expErrs: []string{
+				"rego_parse_error: `if` keyword is required before rule body",
+				"rego_parse_error: `contains` keyword is required for partial set rules",
+			},
+		},
+		{
+			note:              "v1, no keywords imported",
+			bundleRegoVersion: 1,
+			modules: map[string]string{
+				"test.rego": `package test
+a contains 4 if {
+	1 == 1
+}`,
+			},
+			query: `data.test.a`,
+		},
+	}
+
+	bundleTypeCases := []struct {
+		note string
+		tar  bool
+	}{
+		{
+			"bundle dir", false,
+		},
+		{
+			"bundle tar", true,
+		},
+	}
+
+	modes := []struct {
+		name string
+		e2e  bool
+	}{
+		{
+			name: "run",
+		},
+		{
+			name: "e2e",
+			e2e:  true,
+		},
+	}
+
+	for _, bundleType := range bundleTypeCases {
+		for _, mode := range modes {
+			for _, tc := range tests {
+				t.Run(fmt.Sprintf("%s, %s, %s", bundleType.note, tc.note, mode.name), func(t *testing.T) {
+					files := map[string]string{}
+
+					if bundleType.tar {
+						files["bundle.tar.gz"] = ""
+					} else {
+						for k, v := range tc.modules {
+							files[k] = v
+						}
+
+						manifest := bundle.Manifest{
+							RegoVersion:      &tc.bundleRegoVersion,
+							FileRegoVersions: tc.bundleFileRegoVersions,
+						}
+						manifest.Init()
+						if b, err := json.Marshal(manifest); err != nil {
+							t.Fatalf("Unexpected error: %s", err)
+						} else {
+							files[".manifest"] = string(b)
+						}
+					}
+
+					test.WithTempFS(files, func(root string) {
+						p := root
+						if bundleType.tar {
+							b := bundle.Bundle{
+								Manifest: bundle.Manifest{
+									RegoVersion:      &tc.bundleRegoVersion,
+									FileRegoVersions: tc.bundleFileRegoVersions,
+								},
+								Data: map[string]interface{}{},
+							}
+							for k, v := range tc.modules {
+								b.Modules = append(b.Modules, bundle.ModuleFile{
+									Path: k,
+									Raw:  []byte(v),
+								})
+							}
+							p = filepath.Join(root, "bundle.tar.gz")
+							f, err := os.OpenFile(p, os.O_WRONLY, os.ModePerm)
+							if err != nil {
+								t.Fatalf("Unexpected error: %s", err)
+							}
+							err = bundle.Write(f, b)
+							if err != nil {
+								t.Fatalf("Unexpected error: %s", err)
+							}
+						}
+
+						params := testBenchParams()
+						_ = params.outputFormat.Set(evalPrettyOutput)
+
+						params.e2e = mode.e2e
+						err := params.bundlePaths.Set(p)
+						if err != nil {
+							t.Fatalf("Unexpected error: %s", err)
+						}
+
+						args := []string{tc.query}
+
+						var buf bytes.Buffer
+						rc, err := benchMain(args, params, &buf, &goBenchRunner{})
+
+						if len(tc.expErrs) > 0 {
+							if rc == 0 {
+								t.Fatalf("Expected non-zero return code")
+							}
+
+							output := buf.String()
+							for _, expErr := range tc.expErrs {
+								if !strings.Contains(output, expErr) {
+									t.Fatalf("Expected error:\n\n%s\n\ngot:\n\n%s", expErr, output)
+								}
+							}
+						} else {
+							if err != nil {
+								t.Fatalf("Unexpected error: %s", err)
+							}
+							if rc != 0 {
+								t.Fatalf("Unexpected return code %d, expected 0", rc)
+							}
+						}
+					})
+				})
+			}
+		}
 	}
 }
 

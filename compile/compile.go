@@ -83,6 +83,8 @@ type Compiler struct {
 	metadata                     *map[string]interface{}    // represents additional data included in .manifest file
 	fsys                         fs.FS                      // file system to use when loading paths
 	ns                           string
+	regoVersion                  ast.RegoVersion
+	followSymlinks               bool // optionally follow symlinks in the bundle directory when building the bundle
 }
 
 // New returns a new compiler instance that can be invoked.
@@ -218,6 +220,12 @@ func (c *Compiler) WithCapabilities(capabilities *ast.Capabilities) *Compiler {
 	return c
 }
 
+// WithFollowSymlinks sets whether or not to follow symlinks in the bundle directory when building the bundle
+func (c *Compiler) WithFollowSymlinks(yes bool) *Compiler {
+	c.followSymlinks = yes
+	return c
+}
+
 // WithMetadata sets the additional data to be included in .manifest
 func (c *Compiler) WithMetadata(metadata *map[string]interface{}) *Compiler {
 	c.metadata = metadata
@@ -242,20 +250,25 @@ func (c *Compiler) WithPartialNamespace(ns string) *Compiler {
 	return c
 }
 
-func addEntrypointsFromAnnotations(c *Compiler, ar []*ast.AnnotationsRef) error {
-	for _, ref := range ar {
-		var entrypoint ast.Ref
-		scope := ref.Annotations.Scope
+func (c *Compiler) WithRegoVersion(v ast.RegoVersion) *Compiler {
+	c.regoVersion = v
+	return c
+}
 
-		if ref.Annotations.Entrypoint {
+func addEntrypointsFromAnnotations(c *Compiler, arefs []*ast.AnnotationsRef) error {
+	for _, aref := range arefs {
+		var entrypoint ast.Ref
+		scope := aref.Annotations.Scope
+
+		if aref.Annotations.Entrypoint {
 			// Build up the entrypoint path from either package path or rule.
 			switch scope {
 			case "package":
-				if p := ref.GetPackage(); p != nil {
+				if p := aref.GetPackage(); p != nil {
 					entrypoint = p.Path
 				}
-			case "rule":
-				if r := ref.GetRule(); r != nil {
+			case "document":
+				if r := aref.GetRule(); r != nil {
 					entrypoint = r.Ref().GroundPrefix()
 				}
 			default:
@@ -292,7 +305,7 @@ func (c *Compiler) Build(ctx context.Context) error {
 		}
 	}
 
-	if err := c.initBundle(); err != nil {
+	if err := c.initBundle(false); err != nil {
 		return err
 	}
 
@@ -317,6 +330,12 @@ func (c *Compiler) Build(ctx context.Context) error {
 
 	// Ensure we have at least one valid entrypoint, or fail before compilation.
 	if err := c.checkNumEntrypoints(); err != nil {
+		return err
+	}
+
+	// Dedup entrypoint refs, if both CLI and entrypoint metadata annotations
+	// were used.
+	if err := c.dedupEntrypointRefs(); err != nil {
 		return err
 	}
 
@@ -356,8 +375,14 @@ func (c *Compiler) Build(ctx context.Context) error {
 		c.bundle.Manifest.Metadata = *c.metadata
 	}
 
-	if err := c.bundle.FormatModules(false); err != nil {
-		return err
+	if c.regoVersion == ast.RegoV1 {
+		if err := c.bundle.FormatModulesForRegoVersion(c.regoVersion, true, false); err != nil {
+			return err
+		}
+	} else {
+		if err := c.bundle.FormatModules(false); err != nil {
+			return err
+		}
 	}
 
 	if c.bsc != nil {
@@ -417,13 +442,34 @@ func (c *Compiler) checkNumEntrypoints() error {
 	return nil
 }
 
+// Note(philipc): When an entrypoint is provided on the CLI and from an
+// entrypoint annotation, it can lead to duplicates in the slice of
+// entrypoint refs. This can cause panics down the line due to c.entrypoints
+// being a different length than c.entrypointrefs. As a result, we have to
+// trim out the duplicates.
+func (c *Compiler) dedupEntrypointRefs() error {
+	// Build list of entrypoint refs, without duplicates.
+	newEntrypointRefs := make([]*ast.Term, 0, len(c.entrypointrefs))
+	entrypointRefSet := make(map[string]struct{}, len(c.entrypointrefs))
+	for i, r := range c.entrypointrefs {
+		refString := r.String()
+		// Store only the first index in the list that matches.
+		if _, ok := entrypointRefSet[refString]; !ok {
+			entrypointRefSet[refString] = struct{}{}
+			newEntrypointRefs = append(newEntrypointRefs, c.entrypointrefs[i])
+		}
+	}
+	c.entrypointrefs = newEntrypointRefs
+	return nil
+}
+
 // Bundle returns the compiled bundle. This function can be called to retrieve the
 // output of the compiler (as an alternative to having the bundle written to a stream.)
 func (c *Compiler) Bundle() *bundle.Bundle {
 	return c.bundle
 }
 
-func (c *Compiler) initBundle() error {
+func (c *Compiler) initBundle(usePath bool) error {
 	// If the bundle is already set, skip file loading.
 	if c.bundle != nil {
 		return nil
@@ -432,7 +478,17 @@ func (c *Compiler) initBundle() error {
 	// TODO(tsandall): the metrics object should passed through here so we that
 	// we can track read and parse times.
 
-	load, err := initload.LoadPaths(c.paths, c.filter, c.asBundle, c.bvc, false, c.useRegoAnnotationEntrypoints, c.capabilities, c.fsys)
+	load, err := initload.LoadPathsForRegoVersion(
+		c.regoVersion,
+		c.paths,
+		c.filter,
+		c.asBundle,
+		c.bvc,
+		false,
+		c.useRegoAnnotationEntrypoints,
+		c.followSymlinks,
+		c.capabilities,
+		c.fsys)
 	if err != nil {
 		return fmt.Errorf("load error: %w", err)
 	}
@@ -451,7 +507,7 @@ func (c *Compiler) initBundle() error {
 			bundles = append(bundles, load.Bundles[k])
 		}
 
-		result, err := bundle.Merge(bundles)
+		result, err := bundle.MergeWithRegoVersion(bundles, c.regoVersion, usePath)
 		if err != nil {
 			return fmt.Errorf("bundle merge failed: %v", err)
 		}
@@ -464,6 +520,7 @@ func (c *Compiler) initBundle() error {
 	// contents. That would require changes to the loader to preserve the
 	// locations where base documents were mounted under data.
 	result := &bundle.Bundle{}
+	result.SetRegoVersion(c.regoVersion)
 	if len(c.roots) > 0 {
 		result.Manifest.Roots = &c.roots
 	}
@@ -494,7 +551,6 @@ func (c *Compiler) initBundle() error {
 }
 
 func (c *Compiler) optimize(ctx context.Context) error {
-
 	if c.optimizationLevel <= 0 {
 		var err error
 		c.compiler, err = compile(c.capabilities, c.bundle, c.debug, c.enablePrintStatements)
@@ -505,7 +561,8 @@ func (c *Compiler) optimize(ctx context.Context) error {
 		WithEntrypoints(c.entrypointrefs).
 		WithDebug(c.debug.Writer()).
 		WithShallowInlining(c.optimizationLevel <= 1).
-		WithEnablePrintStatements(c.enablePrintStatements)
+		WithEnablePrintStatements(c.enablePrintStatements).
+		WithRegoVersion(c.regoVersion)
 
 	if c.ns != "" {
 		o = o.WithPartialNamespace(c.ns)
@@ -830,6 +887,7 @@ type optimizer struct {
 	shallow               bool
 	debug                 debug.Debug
 	enablePrintStatements bool
+	regoVersion           ast.RegoVersion
 }
 
 func newOptimizer(c *ast.Capabilities, b *bundle.Bundle) *optimizer {
@@ -867,6 +925,11 @@ func (o *optimizer) WithShallowInlining(yes bool) *optimizer {
 
 func (o *optimizer) WithPartialNamespace(ns string) *optimizer {
 	o.nsprefix = ns
+	return o
+}
+
+func (o *optimizer) WithRegoVersion(regoVersion ast.RegoVersion) *optimizer {
+	o.regoVersion = regoVersion
 	return o
 }
 
@@ -919,6 +982,8 @@ func (o *optimizer) Do(ctx context.Context) error {
 			rego.ParsedUnknowns(unknowns),
 			rego.Compiler(o.compiler),
 			rego.Store(store),
+			rego.Capabilities(o.capabilities),
+			rego.SetRegoVersion(o.regoVersion),
 		)
 
 		o.debug.Printf("optimizer: entrypoint: %v", e)
@@ -1042,6 +1107,7 @@ func (o *optimizer) getSupportForEntrypoint(queries []ast.Body, e *ast.Term, res
 	path := e.Value.(ast.Ref)
 	name := ast.Var(path[len(path)-1].Value.(ast.String))
 	module := &ast.Module{Package: &ast.Package{Path: path[:len(path)-1]}}
+	module.SetRegoVersion(o.regoVersion)
 
 	for _, query := range queries {
 		// NOTE(tsandall): when the query refers to the original entrypoint, throw it
@@ -1084,18 +1150,11 @@ func (o *optimizer) merge(a, b []bundle.ModuleFile) []bundle.ModuleFile {
 		// needed once per rule set and constructing the path for every rule in the
 		// module could expensive for PE output (which can contain hundreds of thousands
 		// of rules.)
-		seen := ast.NewVarSet()
+		seen := ast.NewSet()
 		for _, rule := range b[i].Parsed.Rules {
-			// NOTE(sr): we're relying on the fact that PE never emits ref rules (so far)!
-			// The rule
-			//   p.a = 1 { ... }
-			// will be recorded in prefixes as `data.test.p`, and that'll be checked later on against `data.test.p[k]`
-			if len(rule.Head.Ref()) > 2 {
-				panic("expected a module without ref rules")
-			}
-			name := rule.Head.Name
+			name := ast.NewTerm(rule.Head.Ref())
 			if !seen.Contains(name) {
-				prefixes.Add(ast.NewTerm(b[i].Parsed.Package.Path.Append(ast.StringTerm(string(name)))))
+				prefixes.Add(ast.NewTerm(rule.Ref().ConstantPrefix()))
 				seen.Add(name)
 			}
 		}
@@ -1118,10 +1177,10 @@ func (o *optimizer) merge(a, b []bundle.ModuleFile) []bundle.ModuleFile {
 				continue
 			}
 
-			path := rule.Ref()
+			path := rule.Ref().ConstantPrefix()
 			overlap := prefixes.Until(func(x *ast.Term) bool {
 				r := x.Value.(ast.Ref)
-				return path.HasPrefix(r)
+				return r.HasPrefix(path) || path.HasPrefix(r)
 			})
 			if overlap {
 				discarded.Add(refT)
@@ -1178,6 +1237,13 @@ func compile(c *ast.Capabilities, b *bundle.Bundle, dbg debug.Debug, enablePrint
 
 	if compiler.Failed() {
 		return nil, compiler.Errors
+	}
+
+	minVersion, ok := compiler.Required.MinimumCompatibleVersion()
+	if !ok {
+		dbg.Printf("could not determine minimum compatible version!")
+	} else {
+		dbg.Printf("minimum compatible version: %v", minVersion)
 	}
 
 	return compiler, nil

@@ -80,6 +80,14 @@ production users that have added themselves (in alphabetical order):
   changes before they're deployed to production, and produce audit trails to eliminate
   manual work and accelerate audit processes like SOC and ISO.
 
+* [Elastic](https://www.elastic.co/) uses OPA in its Cloud Security offering to enable CSPM and KSPM solutions, helping customers adhere to best practices
+  defined in CIS benchmarks by tracking misconfigurations on AWS, GCP and Azure. the code is Open Source, see [Security Policies](https://github.com/elastic/cloudbeat/tree/main/security-policies).
+
+* [Facets.cloud](https://www.facets.cloud/) is a DevOps platform designed to streamline software development and deployment processes.
+  The integration of Open Policy Agent (OPA) has been a key factor in developing our [Guardrails Policy](https://readme.facets.cloud/docs/guardrail-policy) feature.
+  Managed using OPA, this feature enables our customers to set rules that align their software blueprints(detailed architectural designs of their software) - with established standards.
+  The Guardrails Policy feature has optimized resource management, minimized redundancy in policy definitions, and ensured comprehensive adherence to organizations’ best practices.
+
 * [Fugue](https://fugue.co) is a cloud security SaaS that uses OPA to
   classify compliance violations and security risks in AWS and Azure
   accounts and generate compliance reports and notifications.
@@ -126,6 +134,11 @@ production users that have added themselves (in alphabetical order):
   the governance of the cluster, checking that developers are following
   the best practices in the admission controller. They also use [confest](https://github.com/open-policy-agent/conftest) to
   enforce policies in their CI/CD pipeline.
+
+* [Mia-Platform](https://mia-platform.eu/) uses OPA to run RBAC authorization policies
+  distributed within the application microservices. They built [Rönd](https://github.com/rond-authz/rond)
+  sidecar to intercept API invocation in the kubernetes ecosystem and created an extensible
+  RBAC solution that protects the application with little-to-none changes to the existing codebase.
 
 * [Netflix](https://www.netflix.com) uses OPA as a method of enforcing
   access control in microservices across a variety of languages and

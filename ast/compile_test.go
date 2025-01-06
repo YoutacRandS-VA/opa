@@ -321,15 +321,13 @@ func TestCompilerGetExports(t *testing.T) {
 		{
 			note: "var key single-value ref rule",
 			modules: modules(`package p
-				q.r[s] = 1 { s := "foo" }`),
+				q.r[s] = 1 if { s := "foo" }`),
 			exports: map[string][]string{"data.p": {"q.r"}},
 		},
 		{
 			note: "simple multi-value ref rule",
 			modules: modules(`package p
-				import future.keywords
-
-				q.r.s contains 1 { true }`),
+				q.r.s contains 1 if { true }`),
 			exports: map[string][]string{"data.p": {"q.r.s"}},
 		},
 		{
@@ -389,7 +387,7 @@ func TestCompilerGetExports(t *testing.T) {
 		{
 			note: "single-value (ref) rule with var key",
 			modules: modules(`package p
-				a.b.q[x] = y { x := 1; y := true }
+				a.b.q[x] = y if { x := 1; y := true }
 				a.b.q[2] = 2`),
 			exports: map[string][]string{
 				"data.p": {"a.b.q", "a.b.q[2]"}, // TODO(sr): GroundPrefix? right thing here?
@@ -477,70 +475,70 @@ func TestCompilerCheckRuleHeadRefs(t *testing.T) {
 			note: "ref contains var",
 			modules: modules(
 				`package x
-				p.q[i].r = 1 { i := 10 }`,
+				p.q[i].r = 1 if { i := 10 }`,
 			),
 		},
 		{
 			note: "valid: ref is single-value rule with var key",
 			modules: modules(
 				`package x
-				p.q.r[i] { i := 10 }`,
+				p.q.r[i] if { i := 10 }`,
 			),
 		},
 		{
 			note: "valid: ref is single-value rule with var key and value",
 			modules: modules(
 				`package x
-				p.q.r[i] = j { i := 10; j := 11 }`,
+				p.q.r[i] = j if { i := 10; j := 11 }`,
 			),
 		},
 		{
 			note: "valid: ref is single-value rule with var key and static value",
 			modules: modules(
 				`package x
-				p.q.r[i] = "ten" { i := 10 }`,
+				p.q.r[i] = "ten" if { i := 10 }`,
 			),
 		},
 		{
 			note: "valid: ref is single-value rule with number key",
 			modules: modules(
 				`package x
-				p.q.r[1] { true }`,
+				p.q.r[1] if { true }`,
 			),
 		},
 		{
 			note: "valid: ref is single-value rule with boolean key",
 			modules: modules(
 				`package x
-				p.q.r[true] { true }`,
+				p.q.r[true] if { true }`,
 			),
 		},
 		{
 			note: "valid: ref is single-value rule with null key",
 			modules: modules(
 				`package x
-				p.q.r[null] { true }`,
+				p.q.r[null] if { true }`,
 			),
 		},
 		{
 			note: "valid: ref is single-value rule with set literal key",
 			modules: modules(
 				`package x
-				p.q.r[set()] { true }`,
+				p.q.r[set()] if { true }`,
 			),
 		},
 		{
 			note: "valid: ref is single-value rule with array literal key",
 			modules: modules(
 				`package x
-				p.q.r[[]] { true }`,
+				p.q.r[[]] if { true }`,
 			),
 		},
 		{
 			note: "valid: ref is single-value rule with object literal key",
 			modules: modules(
 				`package x
-				p.q.r[{}] { true }`,
+				p.q.r[{}] if { true }`,
 			),
 		},
 		{
@@ -548,21 +546,21 @@ func TestCompilerCheckRuleHeadRefs(t *testing.T) {
 			modules: modules(
 				`package x
 				x := [1,2,3]
-				p.q.r[x[i]] { i := 0}`,
+				p.q.r[x[i]] if { i := 0}`,
 			),
 		},
 		{
 			note: "invalid: ref in ref",
 			modules: modules(
 				`package x
-				p.q[arr[0]].r { i := 10 }`,
+				p.q[arr[0]].r if { i := 10 }`,
 			),
 		},
 		{
 			note: "invalid: non-string in ref (not last position)",
 			modules: modules(
 				`package x
-				p.q[10].r { true }`,
+				p.q[10].r if { true }`,
 			),
 		},
 		{
@@ -579,6 +577,22 @@ func TestCompilerCheckRuleHeadRefs(t *testing.T) {
 				p.q.r[y.z] if y := {"z": "a"}`,
 			),
 			expected: MustParseRule(`p.q.r[__local0__]  { y := {"z": "a"}; __local0__ = y.z }`),
+		},
+		{
+			note: "rewrite: single-value with non-var ref term",
+			modules: modules(
+				`package x
+				p.q[y.z].r if y := {"z": "a"}`,
+			),
+			expected: MustParseRule(`p.q[__local0__].r  { y := {"z": "a"}; __local0__ = y.z }`),
+		},
+		{
+			note: "rewrite: single-value with non-var ref term and key",
+			modules: modules(
+				`package x
+				p.q[a.b][c.d] if y := {"z": "a"}`,
+			),
+			expected: MustParseRule(`p.q[__local0__][__local1__]  { y := {"z": "a"}; __local0__ = a.b; __local1__ = c.d }`),
 		},
 	}
 
@@ -679,9 +693,9 @@ func TestRuleTreeWithDotsInHeads(t *testing.T) {
 			note: "simple: two modules, one using ref head, one package path",
 			modules: modules(
 				`package x
-				p.q.r = 1 { input == 1 }`,
+				p.q.r = 1 if { input == 1 }`,
 				`package x.p.q
-				r = 2 { input == 2 }`,
+				r = 2 if { input == 2 }`,
 			),
 			size: 2,
 		},
@@ -689,9 +703,9 @@ func TestRuleTreeWithDotsInHeads(t *testing.T) {
 			note: "conflict: two modules, both using ref head, different package paths",
 			modules: modules(
 				`package x
-				p.q.r = 1 { input == 1 }`, // x.p.q.r = 1
+				p.q.r = 1 if { input == 1 }`, // x.p.q.r = 1
 				`package x.p
-				q.r.s = 2 { input == 2 }`, // x.p.q.r.s = 2
+				q.r.s = 2 if { input == 2 }`, // x.p.q.r.s = 2
 			),
 			size: 2,
 		},
@@ -712,7 +726,7 @@ func TestRuleTreeWithDotsInHeads(t *testing.T) {
 				p.q.w[1] = 2
 				p.q.w[{"foo": "baz"}] = 20
 				p.q.x[true] = false
-				p.q.x[y] = y { y := "y" }`,
+				p.q.x[y] = y if { y := "y" }`,
 			),
 			size:  4,
 			depth: 6,
@@ -752,8 +766,91 @@ func TestRuleTreeWithDotsInHeads(t *testing.T) {
 	}
 }
 
+func TestRuleIndices(t *testing.T) {
+	tests := []struct {
+		note    string
+		modules []*Module
+		exp     map[string][]Ref
+	}{
+		{
+			note: "regression test for #6930 (no if)",
+			modules: modules(
+				`package test
+			
+				p.q contains "foo"
+
+				p[q] := r if {
+					q := "bar"
+					r := "baz"
+				}`,
+			),
+			exp: map[string][]Ref{
+				"data.test.p": {
+					MustParseRef("p.q"),
+					MustParseRef("p[__local0__]"),
+				},
+			},
+		},
+		{
+			note: "regression test for #6930 (if)",
+			modules: modules(
+				`package test
+
+				p.q contains "foo"
+
+				p[q] := r if {
+					q := "bar"
+					r := "baz"
+				}`,
+			),
+			exp: map[string][]Ref{
+				"data.test.p": {
+					MustParseRef("p.q"),
+					MustParseRef("p[__local0__]"),
+				},
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.note, func(t *testing.T) {
+			c := NewCompiler()
+			for i, m := range tc.modules {
+				c.Modules[fmt.Sprint(i)] = m
+				c.sorted = append(c.sorted, fmt.Sprint(i))
+			}
+			compileStages(c, c.buildRuleIndices)
+
+			for k, expIndex := range tc.exp {
+				kref := MustParseRef(k)
+				i, ok := c.ruleIndices.Get(kref)
+				if i == nil || !ok {
+					t.Fatalf("expected rule indices for %v", k)
+				}
+				index := i.(*baseDocEqIndex)
+				for _, expRef := range expIndex {
+					found := false
+					for _, r := range index.root.rules {
+						if r.rule.Head.Ref().Equal(expRef) {
+							found = true
+							break
+						}
+					}
+					if !found {
+						t.Errorf("expected rule %v in index for %v", expRef, k)
+					}
+				}
+			}
+		})
+	}
+}
+
 func TestRuleTreeWithVars(t *testing.T) {
-	opts := ParserOptions{AllFutureKeywords: true, unreleasedKeywords: true}
+	opts := ParserOptions{
+		RegoVersion:        RegoV0,
+		AllFutureKeywords:  true,
+		unreleasedKeywords: true,
+	}
 
 	t.Run("simple single-value rule", func(t *testing.T) {
 		mod0 := `package a.b
@@ -1023,8 +1120,12 @@ func TestModuleTreeFilenameOrder(t *testing.T) {
 	// becomes very apparent: before this change, the rule that was reported as
 	// "conflicting" was that of either one of the input files, randomly.
 	mods := map[string]*Module{
-		"0.rego": MustParseModule("package p\nr = 1 { true }"),
-		"1.rego": MustParseModule("package p\nr = 2 { true }"),
+		"0.rego": MustParseModule(`package p
+import rego.v1
+r = 1 if { true }`),
+		"1.rego": MustParseModule(`package p
+import rego.v1
+r = 2 if { true }`),
 	}
 	tree := NewModuleTree(mods)
 	vals := tree.Children[Var("data")].Children[String("p")].Modules
@@ -1054,9 +1155,10 @@ func TestRuleTree(t *testing.T) {
 	p = 1`)
 	mods["mod-incr"] = MustParseModule(`
 	package a.b.c
+	import rego.v1
 
-	s[1] { true }
-	s[2] { true }`,
+	s contains 1 if { true }
+	s contains 2 if { true }`,
 	)
 
 	mods["dots-in-heads"] = MustParseModule(`
@@ -1124,7 +1226,7 @@ func TestCompilerEmpty(t *testing.T) {
 
 func TestCompilerExample(t *testing.T) {
 	c := NewCompiler()
-	m := MustParseModule(testModule)
+	m := MustParseModuleWithOpts(testModule, ParserOptions{AllFutureKeywords: true})
 	c.Compile(map[string]*Module{"testMod": m})
 	assertNotFailed(t, c)
 }
@@ -1136,7 +1238,7 @@ func TestCompilerWithStageAfter(t *testing.T) {
 			CompilerStageDefinition{"MockStage", "mock_stage",
 				func(*Compiler) *Error { return NewError(CompileErr, &Location{}, "mock stage error") }},
 		)
-		m := MustParseModule(testModule)
+		m := MustParseModuleWithOpts(testModule, ParserOptions{AllFutureKeywords: true})
 		c.Compile(map[string]*Module{"testMod": m})
 
 		if !c.Failed() {
@@ -1172,7 +1274,9 @@ q := true`)
 				CompilerStageDefinition{"MockStage", "mock_stage",
 					func(*Compiler) *Error { return NewError(CompileErr, &Location{}, "mock stage error") }})
 		m := MustParseModule(`package p
-q {
+import rego.v1
+
+q if {
 	1 == "a" # would fail "CheckTypes", the next stage
 }
 `)
@@ -1372,7 +1476,7 @@ func TestCompilerFunctions(t *testing.T) {
 			modules := map[string]*Module{}
 			for i, module := range tc.modules {
 				name := fmt.Sprintf("mod%d", i)
-				modules[name], err = ParseModule(name, module)
+				modules[name], err = ParseModuleWithOpts(name, module, ParserOptions{RegoVersion: RegoV0})
 				if err != nil {
 					panic(err)
 				}
@@ -1391,13 +1495,15 @@ func TestCompilerFunctions(t *testing.T) {
 func TestCompilerErrorLimit(t *testing.T) {
 	modules := map[string]*Module{
 		"test": MustParseModule(`package test
-	r = y { y = true; x = z }
+	import rego.v1
 
-	s[x] = y {
+	r = y if { y = true; x = z }
+
+	s[x] = y if {
 		z = y + x
 	}
 
-	t[x] { split(x, y, z) }
+	t contains x if { split(x, y, z) }
 	`),
 	}
 
@@ -1406,8 +1512,8 @@ func TestCompilerErrorLimit(t *testing.T) {
 
 	errs := c.Errors
 	exp := []string{
-		"2:20: rego_unsafe_var_error: var x is unsafe",
-		"2:20: rego_unsafe_var_error: var z is unsafe",
+		"4:23: rego_unsafe_var_error: var x is unsafe",
+		"4:23: rego_unsafe_var_error: var z is unsafe",
 		"rego_compile_error: error limit reached",
 	}
 
@@ -1429,12 +1535,12 @@ func TestCompilerCheckSafetyHead(t *testing.T) {
 	popts := ParserOptions{AllFutureKeywords: true, unreleasedKeywords: true}
 	c.Modules["newMod"] = MustParseModuleWithOpts(`package a.b
 
-unboundKey[x1] = y { q[y] = {"foo": [1, 2, [{"bar": y}]]} }
-unboundVal[y] = x2 { q[y] = {"foo": [1, 2, [{"bar": y}]]} }
-unboundCompositeVal[y] = [{"foo": x3, "bar": y}] { q[y] = {"foo": [1, 2, [{"bar": y}]]} }
-unboundCompositeKey[[{"x": x4}]] { q[y] }
-unboundBuiltinOperator = eq { 4 = 1 }
-unboundElse { false } else = else_var { true }
+unboundKey[x1] = y if { q[y] = {"foo": [1, 2, [{"bar": y}]]} }
+unboundVal[y] = x2 if { q[y] = {"foo": [1, 2, [{"bar": y}]]} }
+unboundCompositeVal[y] = [{"foo": x3, "bar": y}] if { q[y] = {"foo": [1, 2, [{"bar": y}]]} }
+unboundCompositeKey contains [{"x": x4}] if { q[y] }
+unboundBuiltinOperator = eq if { 4 = 1 }
+unboundElse if { false } else = else_var if { true }
 c.d.e[x5] if true
 f.g.h[y] = x6 if y := "y"
 i.j.k contains x7 if true
@@ -1506,7 +1612,11 @@ func TestCompilerCheckSafetyBodyReordering(t *testing.T) {
 
 	for i, tc := range tests {
 		t.Run(tc.note, func(t *testing.T) {
-			opts := ParserOptions{AllFutureKeywords: true, unreleasedKeywords: true}
+			opts := ParserOptions{
+				RegoVersion:        RegoV0,
+				AllFutureKeywords:  true,
+				unreleasedKeywords: true,
+			}
 			c := NewCompiler()
 			c.Modules = getCompilerTestModules()
 			c.Modules["reordering"] = MustParseModuleWithOpts(fmt.Sprintf(
@@ -1541,20 +1651,20 @@ func TestCompilerCheckSafetyBodyReorderingClosures(t *testing.T) {
 		{
 			note: "comprehensions-1",
 			mod: MustParseModule(`package compr
-
+import rego.v1
 import data.b
 import data.c
-p = true { v = [null | true]; xs = [x | a[i] = x; a = [y | y != 1; y = c[j]]]; xs[j] > 0; z = [true | data.a.b.d.t with input as i2; i2 = i]; b[i] = j }
+p = true if { v = [null | true]; xs = [x | a[i] = x; a = [y | y != 1; y = c[j]]]; xs[j] > 0; z = [true | data.a.b.d.t with input as i2; i2 = i]; b[i] = j }
 `),
 			exp: MustParseBody(`v = [null | true]; data.b[i] = j; xs = [x | a = [y | y = data.c[j]; y != 1]; a[i] = x]; xs[j] > 0; z = [true | i2 = i; data.a.b.d.t with input as i2]`),
 		},
 		{
 			note: "comprehensions-2",
 			mod: MustParseModule(`package compr
-
+import rego.v1
 import data.b
 import data.c
-q = true { _ = [x | x = b[i]]; _ = b[j]; _ = [x | x = true; x != false]; true != false; _ = [x | data.foo[_] = x]; data.foo[_] = _ }
+q = true if { _ = [x | x = b[i]]; _ = b[j]; _ = [x | x = true; x != false]; true != false; _ = [x | data.foo[_] = x]; data.foo[_] = _ }
 `),
 			exp: MustParseBody(`_ = [x | x = data.b[i]]; _ = data.b[j]; _ = [x | x = true; x != false]; true != false; _ = [x | data.foo[_] = x]; data.foo[_] = _`),
 		},
@@ -1562,22 +1672,22 @@ q = true { _ = [x | x = b[i]]; _ = b[j]; _ = [x | x = true; x != false]; true !=
 		{
 			note: "comprehensions-3",
 			mod: MustParseModule(`package compr
-
+import rego.v1
 import data.b
 import data.c
-fn(x) = y {
+fn(x) = y if {
 	trim(x, ".", y)
 }
-r = true { a = [x | split(y, ".", z); x = z[i]; fn("...foo.bar..", y)] }
+r = true if { a = [x | split(y, ".", z); x = z[i]; fn("...foo.bar..", y)] }
 `),
 			exp: MustParseBody(`a = [x | data.compr.fn("...foo.bar..", y); split(y, ".", z); x = z[i]]`),
 		},
 		{
 			note: "closure over function output",
 			mod: MustParseModule(`package test
-import future.keywords
+import rego.v1
 
-p {
+p if {
 	object.get(input.subject.roles[_], comp, [""], output)
 	comp = [ 1 | true ]
 	every y in [2] {
@@ -1621,39 +1731,39 @@ func TestCompilerCheckSafetyBodyErrors(t *testing.T) {
 		moduleContent string
 		expected      string
 	}{
-		{"ref-head", `p { a.b.c = "foo" }`, `{a,}`},
-		{"ref-head-2", `p { {"foo": [{"bar": a.b.c}]} = {"foo": [{"bar": "baz"}]} }`, `{a,}`},
-		{"negation", `p { a = [1, 2, 3, 4]; not a[i] = x }`, `{i, x}`},
-		{"negation-head", `p[x] { a = [1, 2, 3, 4]; not a[i] = x }`, `{i,x}`},
-		{"negation-multiple", `p { a = [1, 2, 3, 4]; b = [1, 2, 3, 4]; not a[i] = x; not b[j] = x }`, `{i, x, j}`},
-		{"negation-nested", `p { a = [{"foo": ["bar", "baz"]}]; not a[0].foo = [a[0].foo[i], a[0].foo[j]] } `, `{i, j}`},
-		{"builtin-input", `p { count([1, 2, x], x) }`, `{x,}`},
-		{"builtin-input-name", `p { count(eq, 1) }`, `{eq,}`},
-		{"builtin-multiple", `p { x > 0; x <= 3; x != 2 }`, `{x,}`},
-		{"unordered-object-keys", `p { x = "a"; [{x: y, z: a}] = [{"a": 1, "b": 2}]}`, `{a,y,z}`},
-		{"unordered-sets", `p { x = "a"; [{x, y}] = [{1, 2}]}`, `{y,}`},
-		{"array-compr", `p { _ = [x | x = data.a[_]; y > 1] }`, `{y,}`},
-		{"array-compr-nested", `p { _ = [x | x = a[_]; a = [y | y = data.a[_]; z > 1]] }`, `{z,}`},
-		{"array-compr-closure", `p { _ = [v | v = [x | x = data.a[_]]; x > 1] }`, `{x,}`},
-		{"array-compr-term", `p { _ = [u | true] }`, `{u,}`},
-		{"array-compr-term-nested", `p { _ = [v | v = [w | w != 0]] }`, `{w,}`},
-		{"array-compr-mixed", `p { _ = [x | y = [a | a = z[i]]] }`, `{a, x, z, i}`},
-		{"array-compr-builtin", `p { [true | eq != 2] }`, `{eq,}`},
-		{"closure-self", `p { x = [x | x = 1] }`, `{x,}`},
-		{"closure-transitive", `p { x = y; x = [y | y = 1] }`, `{x,y}`},
-		{"nested", `p { count(baz[i].attr[bar[dead.beef]], n) }`, `{dead,}`},
-		{"negated-import", `p { not foo; not bar; not baz }`, `set()`},
-		{"rewritten", `p[{"foo": dead[i]}] { true }`, `{dead, i}`},
-		{"with-value", `p { data.a.b.d.t with input as x }`, `{x,}`},
-		{"with-value-2", `p { x = data.a.b.d.t with input as x }`, `{x,}`},
-		{"else-kw", "p { false } else { count(x, 1) }", `{x,}`},
-		{"function", "foo(x) = [y, z] { split(x, y, z) }", `{y,z}`},
-		{"call-vars-input", "p { f(x, x) } f(x) = x { true }", `{x,}`},
-		{"call-no-output", "p { f(x) } f(x) = x { true }", `{x,}`},
-		{"call-too-few", "p { f(1,x) } f(x,y) { true }", "{x,}"},
-		{"object-key-comprehension", "p { { {p|x}: 0 } }", "{x,}"},
-		{"set-value-comprehension", "p { {1, {p|x}} }", "{x,}"},
-		{"every", "p { every y in [10] { x > y } }", "{x,}"},
+		{"ref-head", `p if { a.b.c = "foo" }`, `{a,}`},
+		{"ref-head-2", `p if { {"foo": [{"bar": a.b.c}]} = {"foo": [{"bar": "baz"}]} }`, `{a,}`},
+		{"negation", `p if { a = [1, 2, 3, 4]; not a[i] = x }`, `{i, x}`},
+		{"negation-head", `p contains x if { a = [1, 2, 3, 4]; not a[i] = x }`, `{i,x}`},
+		{"negation-multiple", `p if { a = [1, 2, 3, 4]; b = [1, 2, 3, 4]; not a[i] = x; not b[j] = x }`, `{i, x, j}`},
+		{"negation-nested", `p if { a = [{"foo": ["bar", "baz"]}]; not a[0].foo = [a[0].foo[i], a[0].foo[j]] } `, `{i, j}`},
+		{"builtin-input", `p if { count([1, 2, x], x) }`, `{x,}`},
+		{"builtin-input-name", `p if { count(eq, 1) }`, `{eq,}`},
+		{"builtin-multiple", `p if { x > 0; x <= 3; x != 2 }`, `{x,}`},
+		{"unordered-object-keys", `p if { x = "a"; [{x: y, z: a}] = [{"a": 1, "b": 2}]}`, `{a,y,z}`},
+		{"unordered-sets", `p if { x = "a"; [{x, y}] = [{1, 2}]}`, `{y,}`},
+		{"array-compr", `p if { _ = [x | x = data.a[_]; y > 1] }`, `{y,}`},
+		{"array-compr-nested", `p if { _ = [x | x = a[_]; a = [y | y = data.a[_]; z > 1]] }`, `{z,}`},
+		{"array-compr-closure", `p if { _ = [v | v = [x | x = data.a[_]]; x > 1] }`, `{x,}`},
+		{"array-compr-term", `p if { _ = [u | true] }`, `{u,}`},
+		{"array-compr-term-nested", `p if { _ = [v | v = [w | w != 0]] }`, `{w,}`},
+		{"array-compr-mixed", `p if { _ = [x | y = [a | a = z[i]]] }`, `{a, x, z, i}`},
+		{"array-compr-builtin", `p if { [true | eq != 2] }`, `{eq,}`},
+		{"closure-self", `p if { x = [x | x = 1] }`, `{x,}`},
+		{"closure-transitive", `p if { x = y; x = [y | y = 1] }`, `{x,y}`},
+		{"nested", `p if { count(baz[i].attr[bar[dead.beef]], n) }`, `{dead,}`},
+		{"negated-import", `p if { not foo; not bar; not baz }`, `set()`},
+		{"rewritten", `p contains {"foo": dead[i]} if { true }`, `{dead, i}`},
+		{"with-value", `p if { data.a.b.d.t with input as x }`, `{x,}`},
+		{"with-value-2", `p if { x = data.a.b.d.t with input as x }`, `{x,}`},
+		{"else-kw", "p if { false } else if { count(x, 1) }", `{x,}`},
+		{"function", "foo(x) = [y, z] if { split(x, y, z) }", `{y,z}`},
+		{"call-vars-input", "p if { f(x, x) } f(x) = x if { true }", `{x,}`},
+		{"call-no-output", "p if { f(x) } f(x) = x if { true }", `{x,}`},
+		{"call-too-few", "p if { f(1,x) } f(x,y) if { true }", "{x,}"},
+		{"object-key-comprehension", "p if { { {p|x}: 0 } }", "{x,}"},
+		{"set-value-comprehension", "p if { {1, {p|x}} }", "{x,}"},
+		{"every", "p if { every y in [10] { x > y } }", "{x,}"},
 	}
 
 	makeErrMsg := func(varName string) string {
@@ -1674,7 +1784,10 @@ func TestCompilerCheckSafetyBodyErrors(t *testing.T) {
 			sort.Strings(expected)
 
 			// Compile test module.
-			popts := ParserOptions{AllFutureKeywords: true, unreleasedKeywords: true}
+			popts := ParserOptions{
+				AllFutureKeywords:  true,
+				unreleasedKeywords: true,
+			}
 			c := NewCompiler()
 			c.Modules = map[string]*Module{
 				"newMod": MustParseModuleWithOpts(fmt.Sprintf(`
@@ -1709,8 +1822,9 @@ func TestCompilerCheckSafetyBodyErrors(t *testing.T) {
 func TestCompilerCheckSafetyVarLoc(t *testing.T) {
 
 	_, err := CompileModules(map[string]string{"test.rego": `package test
+import rego.v1
 
-p {
+p if {
 	not x
 	x > y
 }`})
@@ -1721,12 +1835,12 @@ p {
 
 	errs := err.(Errors)
 
-	if !strings.Contains(errs[0].Message, "var x is unsafe") || errs[0].Location.Row != 4 {
-		t.Fatal("expected error on row 4 but got:", err)
+	if !strings.Contains(errs[0].Message, "var x is unsafe") || errs[0].Location.Row != 5 {
+		t.Fatal("expected error on row 5 but got:", err)
 	}
 
-	if !strings.Contains(errs[1].Message, "var y is unsafe") || errs[1].Location.Row != 5 {
-		t.Fatal("expected y is unsafe on row 5 but got:", err)
+	if !strings.Contains(errs[1].Message, "var y is unsafe") || errs[1].Location.Row != 6 {
+		t.Fatal("expected y is unsafe on row 6 but got:", err)
 	}
 }
 
@@ -1759,59 +1873,87 @@ func TestCompilerCheckTypes(t *testing.T) {
 	assertNotFailed(t, c)
 }
 
+// Regression test for GH issue #6790
+func TestCompilerCheckEveryWithNestedDomainCalls(t *testing.T) {
+	c := NewCompiler()
+	c.Modules = map[string]*Module{"test": MustParseModule(`package test
+import rego.v1
+
+x if {
+	every p in [1 / 2] {
+		p == true
+	}
+}`)}
+	compileStages(c, c.checkTypes)
+	assertNotFailed(t, c)
+}
+
 func TestCompilerCheckRuleConflicts(t *testing.T) {
 
 	c := getCompilerWithParsedModules(map[string]string{
 		"mod1.rego": `package badrules
 
-p[x] { x = 1 }
-p[x] = y { x = y; x = "a" }
-q[1] { true }
-q = {1, 2, 3} { true }
-r[x] = y { x = y; x = "a" }
-r[x] = y { x = y; x = "a" }`,
+p contains x if { x = 1 }
+p[x] = y if { x = y; x = "a" }
+q contains 1 if { true }
+q = {1, 2, 3} if { true }
+r[x] = y if { x = y; x = "a" }
+r[x] = y if { x = y; x = "a" }
+s contains x if { x = "a" }
+s contains x if { x = "b" }
+t := x if { x = "a"}`,
 
-		"mod2.rego": `package badrules.r
+		// valid extension of r in mod1.rego
+		"mod2a.rego": `package badrules.r
 
-q[1] { true }`,
+q contains 1 if { true }`,
+
+		// invalid override of s in mod1.rego
+		"mod2b.rego": `package badrules.s
+
+q contains 1 if { true }`,
+
+		// invalid override of t in mod1.rego
+		"mod2c.rego": `package badrules.t
+
+q contains 1 if { true }`,
 
 		"mod3.rego": `package badrules.defkw
 
 default foo = 1
 default foo = 2
-foo = 3 { true }
+foo = 3 if { true }
 
 default p.q.bar = 1
 default p.q.bar = 2
-p.q.bar = 3 { true }
+p.q.bar = 3 if { true }
 `,
 		"mod4.rego": `package badrules.arity
 
-f(1) { true }
-f { true }
+f(1) if { true }
+f if { true }
 
-g(1) { true }
-g(1,2) { true }
+g(1) if { true }
+g(1,2) if { true }
 
-p.q.h(1) { true }
-p.q.h { true }
+p.q.h(1) if { true }
+p.q.h if { true }
 
-p.q.i(1) { true }
-p.q.i(1,2) { true }`,
+p.q.i(1) if { true }
+p.q.i(1,2) if { true }`,
 		"mod5.rego": `package badrules.dataoverlap
 
-p { true }`,
+p if { true }`,
 		"mod6.rego": `package badrules.existserr
 
-p { true }`,
+p if { true }`,
 
 		"mod7.rego": `package badrules.foo
-import future.keywords
 
 bar.baz contains "quz" if true`,
 		"mod8.rego": `package badrules.complete_partial
 p := 1
-p[r] := 2 { r := "foo" }`,
+p[r] := 2 if { r := "foo" }`,
 	})
 
 	c.WithPathConflictsCheck(func(path []string) (bool, error) {
@@ -1837,8 +1979,11 @@ p[r] := 2 { r := "foo" }`,
 		"rego_type_error: conflicting rules data.badrules.q found",
 		"rego_type_error: multiple default rules data.badrules.defkw.foo found",
 		"rego_type_error: multiple default rules data.badrules.defkw.p.q.bar found",
-		"rego_type_error: package badrules.r conflicts with rule r[x] defined at mod1.rego:7",
-		"rego_type_error: package badrules.r conflicts with rule r[x] defined at mod1.rego:8",
+		"rego_type_error: package badrules.s conflicts with rule s defined at mod1.rego:10",
+		"rego_type_error: package badrules.s conflicts with rule s defined at mod1.rego:9",
+		"rego_type_error: package badrules.t conflicts with rule t defined at mod1.rego:11",
+		"rego_type_error: rule data.badrules.s conflicts with [data.badrules.s.q]",
+		"rego_type_error: rule data.badrules.t conflicts with [data.badrules.t.q]",
 	}
 
 	assertCompilerErrorStrings(t, c, expected)
@@ -1855,7 +2000,7 @@ func TestCompilerCheckRuleConflictsDefaultFunction(t *testing.T) {
 			modules: modules(
 				`package pkg
 				default f(_) = 100
-				f(x, y) = x {
+				f(x, y) = x if {
                    x == y
 				}`),
 			err: "rego_type_error: conflicting rules data.pkg.f found",
@@ -1889,7 +2034,7 @@ func TestCompilerCheckRuleConflictsDotsInRuleHeads(t *testing.T) {
 			note: "arity mismatch, ref and non-ref rule",
 			modules: modules(
 				`package pkg
-				p.q.r { true }`,
+				p.q.r if { true }`,
 				`package pkg.p.q
 				r(_) = 2`),
 			err: "rego_type_error: conflicting rules data.pkg.p.q.r found",
@@ -1899,7 +2044,7 @@ func TestCompilerCheckRuleConflictsDotsInRuleHeads(t *testing.T) {
 			modules: modules(
 				`package pkg
 				default p.q.r = 3
-				p.q.r { true }`,
+				p.q.r if { true }`,
 				`package pkg.p.q
 				default r = 4
 				r = 2`),
@@ -1909,7 +2054,7 @@ func TestCompilerCheckRuleConflictsDotsInRuleHeads(t *testing.T) {
 			note: "arity mismatch, ref and ref rule",
 			modules: modules(
 				`package pkg.a.b
-				p.q.r { true }`,
+				p.q.r if { true }`,
 				`package pkg.a
 				b.p.q.r(_) = 2`),
 			err: "rego_type_error: conflicting rules data.pkg.a.b.p.q.r found",
@@ -1919,7 +2064,7 @@ func TestCompilerCheckRuleConflictsDotsInRuleHeads(t *testing.T) {
 			modules: modules(
 				`package pkg
 				default p.q.w.r = 3
-				p.q.w.r { true }`,
+				p.q.w.r if { true }`,
 				`package pkg.p
 				default q.w.r = 4
 				q.w.r = 2`),
@@ -1946,7 +2091,7 @@ func TestCompilerCheckRuleConflictsDotsInRuleHeads(t *testing.T) {
 			note: "module conflict: non-ref rule",
 			modules: modules(
 				`package pkg.q
-				r { true }`,
+				r if { true }`,
 				`package pkg.q.r`),
 			err: "rego_type_error: package pkg.q.r conflicts with rule r defined at mod0.rego:2",
 		},
@@ -1954,7 +2099,7 @@ func TestCompilerCheckRuleConflictsDotsInRuleHeads(t *testing.T) {
 			note: "module conflict: ref rule",
 			modules: modules(
 				`package pkg
-				p.q.r { true }`,
+				p.q.r if { true }`,
 				`package pkg.p.q.r`),
 			err: "rego_type_error: package pkg.p.q.r conflicts with rule p.q.r defined at mod0.rego:2",
 		},
@@ -1962,18 +2107,18 @@ func TestCompilerCheckRuleConflictsDotsInRuleHeads(t *testing.T) {
 			note: "single-value with other rule overlap",
 			modules: modules(
 				`package pkg
-				p.q.r { true }`,
+				p.q.r if { true }`,
 				`package pkg
-				p.q.r.s { true }`),
+				p.q.r.s if { true }`),
 			err: "rego_type_error: rule data.pkg.p.q.r conflicts with [data.pkg.p.q.r.s]",
 		},
 		{
 			note: "single-value with other rule overlap",
 			modules: modules(
 				`package pkg
-				p.q.r { true }
-				p.q.r.s { true }
-				p.q.r.t { true }`),
+				p.q.r if { true }
+				p.q.r.s if { true }
+				p.q.r.t if { true }`),
 			err: "rego_type_error: rule data.pkg.p.q.r conflicts with [data.pkg.p.q.r.s data.pkg.p.q.r.t]",
 		},
 		{
@@ -1981,39 +2126,39 @@ func TestCompilerCheckRuleConflictsDotsInRuleHeads(t *testing.T) {
 			modules: modules(
 				`package pkg
 				p.q := 1
-				p.q[r] := 2 { r := "foo" }`),
+				p.q[r] := 2 if { r := "foo" }`),
 			err: "rego_type_error: conflicting rules data.pkg.p.q[r] foun",
 		},
 		{
 			note: "single-value with other rule overlap, unknown key",
 			modules: modules(
 				`package pkg
-				p.q[r] = x { r = input.key; x = input.foo }
-				p.q.r.s = x { true }
+				p.q[r] = x if { r = input.key; x = input.foo }
+				p.q.r.s = x if { true }
 				`),
 		},
 		{
 			note: "single-value with other rule overlap, unknown ref var and key",
 			modules: modules(
 				`package pkg
-				p.q[r][s] = x { r = input.key1; s = input.key2; x = input.foo }
-				p.q.r.s.t = x { true }
+				p.q[r][s] = x if { r = input.key1; s = input.key2; x = input.foo }
+				p.q.r.s.t = x if { true }
 				`),
 		},
 		{
 			note: "single-value partial object with other partial object rule overlap, unknown keys (regression test for #5855; invalidated by multi-var refs)",
 			modules: modules(
 				`package pkg
-				p[r] := x { r = input.key; x = input.bar }
-				p.q[r] := x { r = input.key; x = input.bar }
+				p[r] := x if { r = input.key; x = input.bar }
+				p.q[r] := x if { r = input.key; x = input.bar }
 				`),
 		},
 		{
 			note: "single-value partial object with other partial object (implicit 'true' value) rule overlap, unknown keys",
 			modules: modules(
 				`package pkg
-				p[r] := x { r = input.key; x = input.bar }
-				p.q[r] { r = input.key }
+				p[r] := x if { r = input.key; x = input.bar }
+				p.q[r] if { r = input.key }
 				`),
 		},
 		{
@@ -2021,16 +2166,16 @@ func TestCompilerCheckRuleConflictsDotsInRuleHeads(t *testing.T) {
 			modules: modules(
 				`package pkg
 				import future.keywords
-				p[r] := x { r = input.key; x = input.bar }
-				p.q contains r { r = input.key }
+				p[r] := x if { r = input.key; x = input.bar }
+				p.q contains r if { r = input.key }
 				`),
 		},
 		{
 			note: "single-value partial object with multi-value rule overlap, unknown key",
 			modules: modules(
 				`package pkg
-				p[r] := x { r = input.key; x = input.bar }
-				p.q { true }
+				p[r] := x if { r = input.key; x = input.bar }
+				p contains q if { true }
 				`),
 			err: "rego_type_error: conflicting rules data.pkg.p found",
 		},
@@ -2038,15 +2183,15 @@ func TestCompilerCheckRuleConflictsDotsInRuleHeads(t *testing.T) {
 			note: "single-value rule with known and unknown key",
 			modules: modules(
 				`package pkg
-				p.q[r] = x { r = input.key; x = input.foo }
-				p.q.s = "x" { true }
+				p.q[r] = x if { r = input.key; x = input.foo }
+				p.q.s = "x" if { true }
 				`),
 		},
 		{
 			note: "multi-value rule with other rule overlap",
 			modules: modules(
 				`package pkg
-				p[v] { v := ["a", "b"][_] }
+				p contains v if { v := ["a", "b"][_] }
 				p.q := 42
 				`),
 			err: "rego_type_error: rule data.pkg.p conflicts with [data.pkg.p.q]",
@@ -2055,8 +2200,8 @@ func TestCompilerCheckRuleConflictsDotsInRuleHeads(t *testing.T) {
 			note: "multi-value rule with other rule (ref) overlap",
 			modules: modules(
 				`package pkg
-				p[v] { v := ["a", "b"][_] }
-				p.q.r { true }
+				p contains v if { v := ["a", "b"][_] }
+				p.q.r if { true }
 				`),
 			err: "rego_type_error: rule data.pkg.p conflicts with [data.pkg.p.q.r]",
 		},
@@ -2065,8 +2210,8 @@ func TestCompilerCheckRuleConflictsDotsInRuleHeads(t *testing.T) {
 			modules: modules(
 				`package pkg
 				import future.keywords
-				p.q contains v { v := ["a", "b"][_] }
-				p.q.r { true }
+				p.q contains v if { v := ["a", "b"][_] }
+				p.q.r if { true }
 				`),
 			err: "rule data.pkg.p.q conflicts with [data.pkg.p.q.r]",
 		},
@@ -2075,8 +2220,8 @@ func TestCompilerCheckRuleConflictsDotsInRuleHeads(t *testing.T) {
 			modules: modules(
 				`package pkg
 				import future.keywords
-				p[q] contains v { v := ["a", "b"][_] }
-				p.q.r { true }
+				p[q] contains v if { v := ["a", "b"][_] }
+				p.q.r if { true }
 				`),
 		},
 		{
@@ -2084,7 +2229,7 @@ func TestCompilerCheckRuleConflictsDotsInRuleHeads(t *testing.T) {
 			modules: modules(
 				`package pkg
 				p(x) := x
-				p.q.r { true }
+				p.q.r if { true }
 				`),
 			err: "rego_type_error: rule data.pkg.p conflicts with [data.pkg.p.q.r]",
 		},
@@ -2093,7 +2238,7 @@ func TestCompilerCheckRuleConflictsDotsInRuleHeads(t *testing.T) {
 			modules: modules(
 				`package pkg
 				p(x) := x
-				p.q.r { true }
+				p.q.r if { true }
 				`),
 			err: "rego_type_error: rule data.pkg.p conflicts with [data.pkg.p.q.r]",
 		},
@@ -2102,7 +2247,7 @@ func TestCompilerCheckRuleConflictsDotsInRuleHeads(t *testing.T) {
 			modules: modules(
 				`package pkg
 				p.q(x) := x
-				p.q.r { true }
+				p.q.r if { true }
 				`),
 			err: "rego_type_error: rule data.pkg.p.q conflicts with [data.pkg.p.q.r]",
 		},
@@ -2125,42 +2270,109 @@ func TestCompilerCheckRuleConflictsDotsInRuleHeads(t *testing.T) {
 	}
 }
 
+func TestCompilerCheckRulePkgConflicts(t *testing.T) {
+	tests := []struct {
+		note    string
+		modules []*Module
+		err     []string
+	}{
+		{
+			note: "Package can be declared within dynamic extent of rule (#6387 regression test)",
+			modules: modules(
+				`package test
+					p[x] := y if { x := "a"; y := "b" }`,
+				`package test.p
+					q := 1`),
+		},
+		{
+			note: "Package can be declared deep within dynamic extent of rule (#6387 regression test)",
+			modules: modules(
+				`package test
+					p[x] := y if { x := "a"; y := "b" }`,
+				`package test.p.q.r.s
+					t := 1`),
+		},
+		{
+			note: "Package cannot be declared within extent of single-value rule (ground ref)",
+			modules: modules(
+				`package test
+					p := x if { x := "a" }`,
+				`package test.p
+					q := 1`),
+			err: []string{
+				"rego_type_error: package test.p conflicts with rule p defined at mod0.rego:2",
+				"rego_type_error: rule data.test.p conflicts with [data.test.p.q]",
+			},
+		},
+		{
+			note: "Package cannot be declared within extent of multi-value rule",
+			modules: modules(
+				`package test
+					p contains x if { x := "a" }`,
+				`package test.p
+					q := 1`),
+			err: []string{
+				"rego_type_error: package test.p conflicts with rule p defined at mod0.rego:2",
+				"rego_type_error: rule data.test.p conflicts with [data.test.p.q]",
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.note, func(t *testing.T) {
+			mods := make(map[string]*Module, len(tc.modules))
+			for i, m := range tc.modules {
+				mods[fmt.Sprint(i)] = m
+			}
+			c := NewCompiler()
+			c.Modules = mods
+			compileStages(c, c.checkRuleConflicts)
+			if len(tc.err) > 0 {
+				assertCompilerErrorStrings(t, c, tc.err)
+			} else {
+				assertCompilerErrorStrings(t, c, []string{})
+			}
+		})
+	}
+}
+
 func TestCompilerCheckUndefinedFuncs(t *testing.T) {
 
 	module := `
 		package test
+		import rego.v1
 
-		undefined_function {
+		undefined_function if {
 			data.deadbeef(x)
 		}
 
-		undefined_global {
+		undefined_global if {
 			deadbeef(x)
 		}
 
 		# NOTE: all the dynamic dispatch examples here are not supported,
 		#       we're checking assertions about the error returned.
-		undefined_dynamic_dispatch {
+		undefined_dynamic_dispatch if {
 			x = "f"; data.test2[x](1)
 		}
 
-		undefined_dynamic_dispatch_declared_var {
+		undefined_dynamic_dispatch_declared_var if {
 			y := "f"; data.test2[y](1)
 		}
 
-		undefined_dynamic_dispatch_declared_var_in_array {
+		undefined_dynamic_dispatch_declared_var_in_array if {
 			z := "f"; data.test2[[z]](1)
 		}
 
-		arity_mismatch_1 {
+		arity_mismatch_1 if {
 			data.test2.f(1,2,3)
 		}
 
-		arity_mismatch_2 {
+		arity_mismatch_2 if {
 			data.test2.f()
 		}
 
-		arity_mismatch_3 {
+		arity_mismatch_3 if {
 			x:= data.test2.f()
 		}
 	`
@@ -2187,8 +2399,8 @@ func TestCompilerCheckUndefinedFuncs(t *testing.T) {
 		"rego_type_error: undefined function data.test2[y]",
 		"rego_type_error: undefined function data.test2[[z]]",
 		"rego_type_error: function data.test2.f has arity 1, got 3 arguments",
-		"test.rego:31: rego_type_error: function data.test2.f has arity 1, got 0 arguments",
-		"test.rego:35: rego_type_error: function data.test2.f has arity 1, got 0 arguments",
+		"test.rego:32: rego_type_error: function data.test2.f has arity 1, got 0 arguments",
+		"test.rego:36: rego_type_error: function data.test2.f has arity 1, got 0 arguments",
 	}
 	for _, w := range want {
 		if !strings.Contains(result, w) {
@@ -2468,7 +2680,7 @@ func TestCompilerRewriteExprTerms(t *testing.T) {
 				f(__local0__[0]) { true; __local0__ = [1] }`,
 		},
 		{
-			note: "every: domain",
+			note: "every: domain (array)",
 			module: `
 			package test
 
@@ -2478,12 +2690,89 @@ func TestCompilerRewriteExprTerms(t *testing.T) {
 
 			p { __local2__ = [1, 2]; every __local0__, __local1__ in __local2__ { __local1__ } }`,
 		},
+		{
+			note: "every: domain (call)",
+			module: `
+			package test
+
+			p { every x in numbers.range(1, 3) { x } }`,
+			expected: `
+			package test
+
+			p = true {
+				numbers.range(1, 3, __local3__)
+				__local2__ = __local3__
+				every __local0__, __local1__ in __local2__ {
+					__local1__
+				}
+			}`,
+		},
+		{
+			note: "every: domain (nested calls)",
+			module: `
+			package test
+
+			p { every x in numbers.range(1 + 2, 3 * 4) { x } }`,
+			expected: `
+			package test
+
+			p = true { 
+				plus(1, 2, __local3__)
+				mul(3, 4, __local4__)
+				numbers.range(__local3__, __local4__, __local5__)
+				__local2__ = __local5__
+				every __local0__, __local1__ in __local2__ { 
+					__local1__ 
+				}
+			}`,
+		},
+		// Regression test for GH issue #6790
+		{
+			note: "every: domain (array with call)",
+			module: `
+			package test
+
+			p { every x in [1 / 2, "foo", abs(-1)] { x } }`,
+			expected: `
+			package test
+
+			p = true { 
+				div(1, 2, __local3__)
+				abs(-1, __local4__)
+				__local2__ = [__local3__, "foo", __local4__]
+				every __local0__, __local1__ in __local2__ {
+					__local1__
+				} 
+			}`,
+		},
+		{
+			note: "every: domain (nested array with call)",
+			module: `
+			package test
+
+			p { every x in [1 / 2, ["foo", abs(-1)]] { x } }`,
+			expected: `
+			package test
+
+			p = true { 
+				div(1, 2, __local3__)
+				abs(-1, __local4__)
+				__local2__ = [__local3__, ["foo", __local4__]]
+				every __local0__, __local1__ in __local2__ { 
+					__local1__ 
+				} 
+			}`,
+		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.note, func(t *testing.T) {
 			compiler := NewCompiler()
-			opts := ParserOptions{AllFutureKeywords: true, unreleasedKeywords: true}
+			opts := ParserOptions{
+				RegoVersion:        RegoV0,
+				AllFutureKeywords:  true,
+				unreleasedKeywords: true,
+			}
 
 			compiler.Modules = map[string]*Module{
 				"test": MustParseModuleWithOpts(tc.module, opts),
@@ -2590,7 +2879,11 @@ p := [data() | data := 1]`,
 	for _, tc := range cases {
 		t.Run(tc.note, func(t *testing.T) {
 			compiler := NewCompiler()
-			opts := ParserOptions{AllFutureKeywords: true, unreleasedKeywords: true}
+			opts := ParserOptions{
+				RegoVersion:        RegoV0,
+				AllFutureKeywords:  true,
+				unreleasedKeywords: true,
+			}
 
 			compiler.Modules = map[string]*Module{
 				"test": MustParseModuleWithOpts(tc.module, opts),
@@ -2682,6 +2975,13 @@ func TestCompilerCheckUnusedImports(t *testing.T) {
 					Message:  "import data.x.power unused",
 				},
 			},
+		},
+		{
+			note: "ignore unused rego import",
+			module: `package p
+			import rego.v1
+			r if { 10 == 10 }
+			`,
 		},
 		{
 			note: "import used in comparison",
@@ -2892,6 +3192,60 @@ func TestCompilerCheckKeywordOverrides(t *testing.T) {
 			},
 		},
 		{
+			note: "rule names (set construction)",
+			module: `package test
+				input.a { true }
+				p { true }
+				data.b { true }
+			`,
+			expectedErrors: Errors{
+				&Error{
+					Location: NewLocation([]byte("input.a { true }"), "", 2, 5),
+					Message:  "rules must not shadow input (use a different rule name)",
+				},
+				&Error{
+					Location: NewLocation([]byte("data.b { true }"), "", 4, 5),
+					Message:  "rules must not shadow data (use a different rule name)",
+				},
+			},
+		},
+		{
+			note: "rule names (object construction)",
+			module: `package test
+				input.a := 1 { true }
+				p { true }
+				data.b := 2 { true }
+			`,
+			expectedErrors: Errors{
+				&Error{
+					Location: NewLocation([]byte("input.a := 1 { true }"), "", 2, 5),
+					Message:  "rules must not shadow input (use a different rule name)",
+				},
+				&Error{
+					Location: NewLocation([]byte("data.b := 2 { true }"), "", 4, 5),
+					Message:  "rules must not shadow data (use a different rule name)",
+				},
+			},
+		},
+		{
+			note: "leading term in rule refs",
+			module: `package test
+				input.a.b { true }
+				p { true }
+				data.b.c := "foo" { true }
+			`,
+			expectedErrors: Errors{
+				&Error{
+					Location: NewLocation([]byte("input.a.b { true }"), "", 2, 5),
+					Message:  "rules must not shadow input (use a different rule name)",
+				},
+				&Error{
+					Location: NewLocation([]byte(`data.b.c := "foo" { true }`), "", 4, 5),
+					Message:  "rules must not shadow data (use a different rule name)",
+				},
+			},
+		},
+		{
 			note: "global assignments",
 			module: `package test
 				input = 1
@@ -3095,7 +3449,7 @@ func runStrictnessTestCase(t *testing.T, cases []strictnessTestCase, assertLocat
 		return func(t *testing.T) {
 			compiler := NewCompiler().WithStrict(strict)
 			compiler.Modules = map[string]*Module{
-				"test": MustParseModule(tc.module),
+				"test": MustParseModuleWithOpts(tc.module, ParserOptions{RegoVersion: RegoV0}),
 			}
 			compileStages(compiler, nil)
 
@@ -3138,6 +3492,551 @@ func assertErrors(t *testing.T, actual Errors, expected Errors, assertLocation b
 	}
 }
 
+func TestCompileRegoV1Import(t *testing.T) {
+	cases := []struct {
+		note           string
+		modules        map[string]string
+		expectedErrors Errors
+	}{
+		// Duplicate imports
+		{
+			note: "duplicate imports",
+			modules: map[string]string{
+				"policy.rego": `package test
+					import rego.v1
+					import data.foo
+					import data.bar.foo
+					p if {
+						foo == "bar"
+					}`,
+			},
+			expectedErrors: Errors{
+				&Error{
+					Message:  "import must not shadow import data.foo",
+					Location: &Location{Text: []byte("import"), File: "policy.rego", Row: 4, Col: 6},
+				},
+			},
+		},
+		{
+			note: "duplicate imports (alias)",
+			modules: map[string]string{
+				"policy.rego": `package test
+					import rego.v1
+					import data.foo
+					import data.bar as foo
+					p if {
+						foo == "bar"
+					}`,
+			},
+			expectedErrors: Errors{
+				&Error{
+					Message:  "import must not shadow import data.foo",
+					Location: &Location{Text: []byte("import"), File: "policy.rego", Row: 4, Col: 6},
+				},
+			},
+		},
+		{
+			note: "duplicate imports (alias, different order)",
+			modules: map[string]string{
+				"policy.rego": `package test
+					import rego.v1
+					import data.bar as foo
+					import data.foo
+					p if {
+						foo == "bar"
+					}`,
+			},
+			expectedErrors: Errors{
+				&Error{
+					Message:  "import must not shadow import data.bar as foo",
+					Location: &Location{Text: []byte("import"), File: "policy.rego", Row: 4, Col: 6},
+				},
+			},
+		},
+		{
+			note: "duplicate imports (repeat)",
+			modules: map[string]string{
+				"policy.rego": `package test
+					import rego.v1
+					import data.foo
+					import data.foo
+					p if {
+						foo == "bar"
+					}`,
+			},
+			expectedErrors: Errors{
+				&Error{
+					Message:  "import must not shadow import data.foo",
+					Location: &Location{Text: []byte("import"), File: "policy.rego", Row: 4, Col: 6},
+				},
+			},
+		},
+		{
+			note: "duplicate imports (multiple modules)",
+			modules: map[string]string{
+				"policy1.rego": `package test
+					import rego.v1
+					import data.foo
+					import data.bar.foo
+					p if {
+						foo == "bar"
+					}`,
+				"policy2.rego": `package test
+					import rego.v1
+					import data.foo
+					import data.bar.foo
+					q if {
+						foo == "bar"
+					}`,
+			},
+			expectedErrors: Errors{
+				&Error{
+					Message:  "import must not shadow import data.foo",
+					Location: &Location{Text: []byte("import"), File: "policy1.rego", Row: 4, Col: 6},
+				},
+				&Error{
+					Message:  "import must not shadow import data.foo",
+					Location: &Location{Text: []byte("import"), File: "policy2.rego", Row: 4, Col: 6},
+				},
+			},
+		},
+		{
+			note: "duplicate imports (multiple modules, not all strict)",
+			modules: map[string]string{
+				"policy1.rego": `package test
+					import future.keywords.if
+					import data.foo
+					import data.bar.foo
+					p if {
+						foo == "bar"
+					}`,
+				"policy2.rego": `package test
+					import rego.v1
+					import data.foo
+					import data.bar.foo
+					q if {
+						foo == "bar"
+					}`,
+			},
+			expectedErrors: Errors{
+				&Error{
+					Message:  "import must not shadow import data.foo",
+					Location: &Location{Text: []byte("import"), File: "policy2.rego", Row: 4, Col: 6},
+				},
+			},
+		},
+		// var shadowing
+		{
+			note: "var shadows input",
+			modules: map[string]string{
+				"policy.rego": `package test
+					import rego.v1
+					p if {
+						input := 1
+						input == 1
+					}`,
+			},
+			expectedErrors: Errors{
+				&Error{
+					Message:  "variables must not shadow input (use a different variable name)",
+					Location: &Location{Text: []byte("input := 1"), File: "policy.rego", Row: 4, Col: 7},
+				},
+			},
+		},
+		{
+			note: "var shadows input (multiple modules)",
+			modules: map[string]string{
+				"policy1.rego": `package test
+					import rego.v1
+					p if {
+						input := 1
+						input == 1
+					}`,
+				"policy2.rego": `package test
+					import rego.v1
+					q if {
+						input := 1
+						input == 1
+					}`,
+			},
+			expectedErrors: Errors{
+				&Error{
+					Message:  "variables must not shadow input (use a different variable name)",
+					Location: &Location{Text: []byte("input := 1"), File: "policy1.rego", Row: 4, Col: 7},
+				},
+				&Error{
+					Message:  "variables must not shadow input (use a different variable name)",
+					Location: &Location{Text: []byte("input := 1"), File: "policy2.rego", Row: 4, Col: 7},
+				},
+			},
+		},
+		{
+			note: "var shadows input (multiple modules, not all strict)",
+			modules: map[string]string{
+				"policy1.rego": `package test
+					import future.keywords.if
+					p if {
+						input := 1
+						input == 1
+					}`,
+				"policy2.rego": `package test
+					import rego.v1
+					q if {
+						input := 1
+						input == 1
+					}`,
+			},
+			expectedErrors: Errors{
+				&Error{
+					Message:  "variables must not shadow input (use a different variable name)",
+					Location: &Location{Text: []byte("input := 1"), File: "policy2.rego", Row: 4, Col: 7},
+				},
+			},
+		},
+		{
+			note: "var shadows data",
+			modules: map[string]string{
+				"policy.rego": `package test
+					import rego.v1
+					p if {
+						data := 1
+						data == 1
+					}`,
+			},
+			expectedErrors: Errors{
+				&Error{
+					Message:  "variables must not shadow data (use a different variable name)",
+					Location: &Location{Text: []byte("data := 1"), File: "policy.rego", Row: 4, Col: 7},
+				},
+			},
+		},
+		{
+			note: "var shadows data (multiple modules)",
+			modules: map[string]string{
+				"policy1.rego": `package test
+					import rego.v1
+					p if {
+						data := 1
+						data == 1
+					}`,
+				"policy2.rego": `package test
+					import rego.v1
+					q if {
+						data := 1
+						data == 1
+					}`,
+			},
+			expectedErrors: Errors{
+				&Error{
+					Message:  "variables must not shadow data (use a different variable name)",
+					Location: &Location{Text: []byte("data := 1"), File: "policy1.rego", Row: 4, Col: 7},
+				},
+				&Error{
+					Message:  "variables must not shadow data (use a different variable name)",
+					Location: &Location{Text: []byte("data := 1"), File: "policy2.rego", Row: 4, Col: 7},
+				},
+			},
+		},
+		{
+			note: "var shadows data (multiple modules, not all strict)",
+			modules: map[string]string{
+				"policy1.rego": `package test
+					import future.keywords.if
+					p if {
+						data := 1
+						data == 1
+					}`,
+				"policy2.rego": `package test
+					import rego.v1
+					q if {
+						data := 1
+						data == 1
+					}`,
+			},
+			expectedErrors: Errors{
+				&Error{
+					Message:  "variables must not shadow data (use a different variable name)",
+					Location: &Location{Text: []byte("data := 1"), File: "policy2.rego", Row: 4, Col: 7},
+				},
+			},
+		},
+		// rule shadowing
+		{
+			note: "rule shadows input",
+			modules: map[string]string{
+				"policy.rego": `package test
+					import rego.v1
+					input := 1`,
+			},
+			expectedErrors: Errors{
+				&Error{
+					Message:  "rules must not shadow input (use a different rule name)",
+					Location: &Location{Text: []byte("input := 1"), File: "policy.rego", Row: 3, Col: 6},
+				},
+			},
+		},
+		{
+			note: "rule (object) shadows input",
+			modules: map[string]string{
+				"policy.rego": `package test
+					import rego.v1
+					input.a := "b" if { true }`,
+			},
+			expectedErrors: Errors{
+				&Error{
+					Message:  "rules must not shadow input (use a different rule name)",
+					Location: &Location{Text: []byte(`input.a := "b" if { true }`), File: "policy.rego", Row: 3, Col: 6},
+				},
+			},
+		},
+		{
+			note: "rule (set) shadows input",
+			modules: map[string]string{
+				"policy.rego": `package test
+					import rego.v1
+					input contains "a" if { true }`,
+			},
+			expectedErrors: Errors{
+				&Error{
+					Message:  "rules must not shadow input (use a different rule name)",
+					Location: &Location{Text: []byte(`input contains "a" if { true }`), File: "policy.rego", Row: 3, Col: 6},
+				},
+			},
+		},
+		{
+			note: "rule ref shadows input",
+			modules: map[string]string{
+				"policy.rego": `package test
+					import rego.v1
+					input.a.b.c := 1`,
+			},
+			expectedErrors: Errors{
+				&Error{
+					Message:  "rules must not shadow input (use a different rule name)",
+					Location: &Location{Text: []byte("input.a.b.c := 1"), File: "policy.rego", Row: 3, Col: 6},
+				},
+			},
+		},
+		{
+			note: "rule shadows input (multiple modules)",
+			modules: map[string]string{
+				"policy1.rego": `package test
+					import rego.v1
+					input := 1`,
+				"policy2.rego": `package test2
+					import rego.v1
+					input := 2`,
+			},
+			expectedErrors: Errors{
+				&Error{
+					Message:  "rules must not shadow input (use a different rule name)",
+					Location: &Location{Text: []byte("input := 1"), File: "policy1.rego", Row: 3, Col: 6},
+				},
+				&Error{
+					Message:  "rules must not shadow input (use a different rule name)",
+					Location: &Location{Text: []byte("input := 2"), File: "policy2.rego", Row: 3, Col: 6},
+				},
+			},
+		},
+		{
+			note: "rule shadows input (multiple modules, not all strict)",
+			modules: map[string]string{
+				"policy1.rego": `package test
+					input := 1`,
+				"policy2.rego": `package test2
+					import rego.v1
+					input := 2`,
+			},
+			expectedErrors: Errors{
+				&Error{
+					Message:  "rules must not shadow input (use a different rule name)",
+					Location: &Location{Text: []byte("input := 2"), File: "policy2.rego", Row: 3, Col: 6},
+				},
+			},
+		},
+		{
+			note: "rule shadows data",
+			modules: map[string]string{
+				"policy.rego": `package test
+					import rego.v1
+					data := 1`,
+			},
+			expectedErrors: Errors{
+				&Error{
+					Message:  "rules must not shadow data (use a different rule name)",
+					Location: &Location{Text: []byte("data := 1"), File: "policy.rego", Row: 3, Col: 6},
+				},
+			},
+		},
+		{
+			note: "rule (object) shadows input",
+			modules: map[string]string{
+				"policy.rego": `package test
+					import rego.v1
+					data.a := "b" if { true }`,
+			},
+			expectedErrors: Errors{
+				&Error{
+					Message:  "rules must not shadow data (use a different rule name)",
+					Location: &Location{Text: []byte(`data.a := "b" if { true }`), File: "policy.rego", Row: 3, Col: 6},
+				},
+			},
+		},
+		{
+			note: "rule (set) shadows input",
+			modules: map[string]string{
+				"policy.rego": `package test
+					import rego.v1
+					data contains "a" if { true }`,
+			},
+			expectedErrors: Errors{
+				&Error{
+					Message:  "rules must not shadow data (use a different rule name)",
+					Location: &Location{Text: []byte(`data contains "a" if { true }`), File: "policy.rego", Row: 3, Col: 6},
+				},
+			},
+		},
+		{
+			note: "rule ref shadows input",
+			modules: map[string]string{
+				"policy.rego": `package test
+					import rego.v1
+					data.a.b.c := 1`,
+			},
+			expectedErrors: Errors{
+				&Error{
+					Message:  "rules must not shadow data (use a different rule name)",
+					Location: &Location{Text: []byte("data.a.b.c := 1"), File: "policy.rego", Row: 3, Col: 6},
+				},
+			},
+		},
+		{
+			note: "rule shadows data (multiple modules)",
+			modules: map[string]string{
+				"policy1.rego": `package test
+					import rego.v1
+					data := 1`,
+				"policy2.rego": `package test2
+					import rego.v1
+					data := 2`,
+			},
+			expectedErrors: Errors{
+				&Error{
+					Message:  "rules must not shadow data (use a different rule name)",
+					Location: &Location{Text: []byte("data := 1"), File: "policy1.rego", Row: 3, Col: 6},
+				},
+				&Error{
+					Message:  "rules must not shadow data (use a different rule name)",
+					Location: &Location{Text: []byte("data := 2"), File: "policy2.rego", Row: 3, Col: 6},
+				},
+			},
+		},
+		{
+			note: "rule shadows data (multiple modules, not all strict)",
+			modules: map[string]string{
+				"policy1.rego": `package test
+					data := 1`,
+				"policy2.rego": `package test2
+					import rego.v1
+					data := 2`,
+			},
+			expectedErrors: Errors{
+				&Error{
+					Message:  "rules must not shadow data (use a different rule name)",
+					Location: &Location{Text: []byte("data := 2"), File: "policy2.rego", Row: 3, Col: 6},
+				},
+			},
+		},
+		// deprecated built-ins
+		{
+			note: "deprecated built-in",
+			modules: map[string]string{
+				"policy.rego": `package test
+					import rego.v1
+					p := all([true, false])`,
+			},
+			expectedErrors: Errors{
+				&Error{
+					Message:  "deprecated built-in function calls in expression: all",
+					Location: &Location{Text: []byte("all([true, false])"), File: "policy.rego", Row: 3, Col: 11},
+				},
+			},
+		},
+		{
+			note: "deprecated built-in (multiple)",
+			modules: map[string]string{
+				"policy.rego": `package test
+					import rego.v1
+					p := all([true, false])
+					q := any([true, false])`,
+			},
+			expectedErrors: Errors{
+				&Error{
+					Message:  "deprecated built-in function calls in expression: all",
+					Location: &Location{Text: []byte("all([true, false])"), File: "policy.rego", Row: 3, Col: 11},
+				},
+				&Error{
+					Message:  "deprecated built-in function calls in expression: any",
+					Location: &Location{Text: []byte("any([true, false])"), File: "policy.rego", Row: 4, Col: 11},
+				},
+			},
+		},
+		{
+			note: "deprecated built-in (multiple modules)",
+			modules: map[string]string{
+				"policy1.rego": `package test
+					import rego.v1
+					p := all([true, false])`,
+				"policy2.rego": `package test
+					import rego.v1
+					q := all([true, false])`,
+			},
+			expectedErrors: Errors{
+				&Error{
+					Message:  "deprecated built-in function calls in expression: all",
+					Location: &Location{Text: []byte("all([true, false])"), File: "policy1.rego", Row: 3, Col: 11},
+				},
+				&Error{
+					Message:  "deprecated built-in function calls in expression: all",
+					Location: &Location{Text: []byte("all([true, false])"), File: "policy2.rego", Row: 3, Col: 11},
+				},
+			},
+		},
+		{
+			note: "deprecated built-in (multiple modules, not all strict)",
+			modules: map[string]string{
+				"policy1.rego": `package test
+					p := all([true, false])`,
+				"policy2.rego": `package test
+					import rego.v1
+					q := all([true, false])`,
+			},
+			expectedErrors: Errors{
+				&Error{
+					Message:  "deprecated built-in function calls in expression: all",
+					Location: &Location{Text: []byte("all([true, false])"), File: "policy2.rego", Row: 3, Col: 11},
+				},
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.note, func(t *testing.T) {
+			compiler := NewCompiler()
+			compiler.Modules = map[string]*Module{}
+			for name, mod := range tc.modules {
+				if parsed, err := ParseModuleWithOpts(name, mod, ParserOptions{RegoVersion: RegoV0}); err != nil {
+					t.Fatal(err)
+				} else {
+					compiler.Modules[name] = parsed
+				}
+			}
+			compileStages(compiler, nil)
+			assertErrors(t, compiler.Errors, tc.expectedErrors, true)
+		})
+	}
+}
+
 // NOTE(sr): the tests below this function are unwieldy, let's keep adding new ones to this one
 func TestCompilerResolveAllRefsNewTests(t *testing.T) {
 	tests := []struct {
@@ -3153,7 +4052,7 @@ a.b.c = 1
 q if a.b.c == 1
 `,
 			exp: `package test
-a.b.c = 1 { true }
+a.b.c = 1 if { true }
 q if data.test.a.b.c = 1
 `,
 		},
@@ -3179,7 +4078,7 @@ p := count([x | q[x]])
 q[1] = 1
 `,
 			exp: `package test
-p := __local0__ { true; __local1__ = [x | data.test.q[x]]; count(__local1__, __local0__) }
+p := __local0__ if { true; __local1__ = [x | data.test.q[x]]; count(__local1__, __local0__) }
 q[1] = 1
 `,
 		},
@@ -3221,113 +4120,124 @@ func TestCompilerResolveAllRefs(t *testing.T) {
 	c.Modules = getCompilerTestModules()
 	c.Modules["head"] = MustParseModule(`package head
 
+import rego.v1
 import data.doc1 as bar
 import input.x.y.foo
 import input.qux as baz
 
-p[foo[bar[i]]] = {"baz": baz} { true }`)
+p[foo[bar[i]]] := {"baz": baz} if { true }`)
 
 	c.Modules["elsekw"] = MustParseModule(`package elsekw
 
+	import rego.v1
 	import input.x.y.foo
 	import data.doc1 as bar
 	import input.baz
 
-	p {
+	p if {
 		false
-	} else = foo {
+	} else = foo if {
 		bar
-	} else = baz {
+	} else = baz if {
 		true
 	}
 	`)
 
 	c.Modules["nestedexprs"] = MustParseModule(`package nestedexprs
+		import rego.v1
 
 		x = 1
 
-		p {
+		p if {
 			f(g(x))
 		}`)
 
 	c.Modules["assign"] = MustParseModule(`package assign
+		import rego.v1
 
 		x = 1
 		y = 1
 
-		p {
+		p if {
 			x := y
 			[true | x := y]
 		}`)
 
 	c.Modules["someinassign"] = MustParseModule(`package someinassign
-		import future.keywords.in
+		import rego.v1
+
 		x = 1
 		y = 1
 
-		p[x] {
+		p[x] if {
 			some x in [1, 2, y]
 		}`)
 
 	c.Modules["someinassignwithkey"] = MustParseModule(`package someinassignwithkey
-		import future.keywords.in
+		import rego.v1
+
 		x = 1
 		y = 1
 
-		p[x] {
+		p[x] if {
 			some k, v in [1, 2, y]
 		}`)
 
 	c.Modules["donotresolve"] = MustParseModule(`package donotresolve
+		import rego.v1
 
 		x = 1
 
-		f(x) {
+		f(x) if {
 			x = 2
 		}
 		`)
 
 	c.Modules["indirectrefs"] = MustParseModule(`package indirectrefs
+		import rego.v1
 
-		f(x) = [x] {true}
+		f(x) = [x] if {true}
 
-		p {
+		p if {
 			f(1)[0]
 		}
 		`)
 
 	c.Modules["comprehensions"] = MustParseModule(`package comprehensions
+		import rego.v1
 
 		nums = [1, 2, 3]
 
-		f(x) = [x] {true}
+		f(x) = [x] if {true}
 
-		p[[1]] {true}
+		p[[1]] if {true}
 
-		q {
+		q if {
 			p[[x | x = nums[_]]]
 		}
 
 		r = [y | y = f(1)[0]]
 		`)
 
-	c.Modules["everykw"] = MustParseModuleWithOpts(`package everykw
+	c.Modules["everykw"] = MustParseModule(`package everykw
+		import rego.v1
 
-	nums = {1, 2, 3}
-	f(_) = true
-	x = 100
-	xs = [1, 2, 3]
-	p {
-		every x in xs {
-			nums[x]
-			x > 10
-		}
-	}`, ParserOptions{unreleasedKeywords: true, FutureKeywords: []string{"every", "in"}})
+		nums = {1, 2, 3}
+		f(_) = true
+		x = 100
+		xs = [1, 2, 3]
+		p if {
+			every x in xs {
+				nums[x]
+				x > 10
+			}
+		}`)
 
 	c.Modules["heads_with_dots"] = MustParseModule(`package heads_with_dots
+		import rego.v1
 
 		this_is_not = true
-		this.is.dotted { this_is_not }
+		this.is.dotted if { this_is_not }
 	`)
 
 	compileStages(c, c.resolveAllRefs)
@@ -3484,8 +4394,9 @@ func TestCompilerResolveErrors(t *testing.T) {
 	c.Modules = map[string]*Module{
 		"shadow-globals": MustParseModule(`
 			package shadow_globals
+			import rego.v1
 
-			f([input]) { true }
+			f([input]) if { true }
 		`),
 	}
 
@@ -3508,40 +4419,40 @@ func TestCompilerRewriteTermsInHead(t *testing.T) {
 	}{
 		{
 			note: "imports",
-			mod: MustParseModule(`package head
+			mod: module(`package head
 import data.doc1 as bar
 import data.doc2 as corge
 import input.x.y.foo
 import input.qux as baz
 
-p[foo[bar[i]]] = {"baz": baz, "corge": corge} { true }
+p[foo[bar[i]]] = {"baz": baz, "corge": corge} if { true }
 `),
 			exp: MustParseRule(`p[__local0__] = __local1__ { true; __local0__ = input.x.y.foo[data.doc1[i]]; __local1__ = {"baz": input.qux, "corge": data.doc2} }`),
 		},
 		{
 			note: "array comprehension value",
-			mod: MustParseModule(`package head
-q = [true | true] { true }
+			mod: module(`package head
+q = [true | true] if { true }
 `),
 			exp: MustParseRule(`q = __local0__ { true; __local0__ = [true | true] }`),
 		},
 		{
 			note: "array comprehension value in else head",
-			mod: MustParseModule(`package head
-q { 
-	false 
-} else = [true | true] { 
-	true 
+			mod: module(`package head
+q if {
+	false
+} else = [true | true] if {
+	true
 }
 `),
 			exp: MustParseRule(`q = true { false } else = __local0__ { true; __local0__ = [true | true] }`),
 		},
 		{
 			note: "array comprehension value in head (comprehension-local var)",
-			mod: MustParseModule(`package head
-q = [a | a := true] {
+			mod: module(`package head
+q = [a | a := true] if {
 	false
-} else = [a | a := true] {
+} else = [a | a := true] if {
 	true
 }
 `),
@@ -3549,10 +4460,10 @@ q = [a | a := true] {
 		},
 		{
 			note: "array comprehension value in function head (comprehension-local var)",
-			mod: MustParseModule(`package head
-f(x) = [a | a := true] {
+			mod: module(`package head
+f(x) = [a | a := true] if {
 	false
-} else = [a | a := true] {
+} else = [a | a := true] if {
 	true
 }
 `),
@@ -3560,39 +4471,39 @@ f(x) = [a | a := true] {
 		},
 		{
 			note: "array comprehension value in else-func head (reused arg rewrite)",
-			mod: MustParseModule(`package head
-f(x, y) = [x | y] { 
-	false 
-} else = [x | y] {
-	true 
+			mod: module(`package head
+f(x, y) = [x | y] if {
+	false
+} else = [x | y] if {
+	true
 }
 `),
 			exp: MustParseRule(`f(__local0__, __local1__) = __local2__ { false; __local2__ = [__local0__ | __local1__] } else = __local3__ { true; __local3__ = [__local0__ | __local1__] }`),
 		},
 		{
 			note: "object comprehension value",
-			mod: MustParseModule(`package head
-r = {"true": true | true} { true }
+			mod: module(`package head
+r = {"true": true | true} if { true }
 `),
 			exp: MustParseRule(`r = __local0__ { true; __local0__ = {"true": true | true} }`),
 		},
 		{
 			note: "object comprehension value in else head",
-			mod: MustParseModule(`package head
-q { 
-	false 
-} else = {"true": true | true} { 
-	true 
+			mod: module(`package head
+q if {
+	false
+} else = {"true": true | true} if {
+	true
 }
 `),
 			exp: MustParseRule(`q = true { false } else = __local0__ { true; __local0__ = {"true": true | true} }`),
 		},
 		{
 			note: "object comprehension value in head (comprehension-local var)",
-			mod: MustParseModule(`package head
-q = {"a": a | a := true} {
+			mod: module(`package head
+q = {"a": a | a := true} if {
 	false
-} else = {"a": a | a := true} {
+} else = {"a": a | a := true} if {
 	true
 }
 `),
@@ -3600,10 +4511,10 @@ q = {"a": a | a := true} {
 		},
 		{
 			note: "object comprehension value in function head (comprehension-local var)",
-			mod: MustParseModule(`package head
-f(x) = {"a": a | a := true} {
+			mod: module(`package head
+f(x) = {"a": a | a := true} if {
 	false
-} else = {"a": a | a := true} {
+} else = {"a": a | a := true} if {
 	true
 }
 `),
@@ -3611,39 +4522,39 @@ f(x) = {"a": a | a := true} {
 		},
 		{
 			note: "object comprehension value in else-func head (reused arg rewrite)",
-			mod: MustParseModule(`package head
-f(x, y) = {x: y | true} { 
-	false 
-} else = {x: y | true} {
-	true 
+			mod: module(`package head
+f(x, y) = {x: y | true} if {
+	false
+} else = {x: y | true} if {
+	true
 }
 `),
 			exp: MustParseRule(`f(__local0__, __local1__) = __local2__ { false; __local2__ = {__local0__: __local1__ | true} } else = __local3__ { true; __local3__ = {__local0__: __local1__ | true} }`),
 		},
 		{
 			note: "set comprehension value",
-			mod: MustParseModule(`package head
-s = {true | true} { true }
+			mod: module(`package head
+s = {true | true} if { true }
 `),
 			exp: MustParseRule(`s = __local0__ { true; __local0__ = {true | true} }`),
 		},
 		{
 			note: "set comprehension value in else head",
-			mod: MustParseModule(`package head
-q = {false | false} { 
-	false 
-} else = {true | true} { 
-	true 
+			mod: module(`package head
+q = {false | false} if {
+	false
+} else = {true | true} if {
+	true
 }
 `),
 			exp: MustParseRule(`q = __local0__ { false; __local0__ = {false | false} } else = __local1__ { true; __local1__ = {true | true} }`),
 		},
 		{
 			note: "set comprehension value in head (comprehension-local var)",
-			mod: MustParseModule(`package head
-q = {a | a := true} {
+			mod: module(`package head
+q = {a | a := true} if {
 	false
-} else = {a | a := true} {
+} else = {a | a := true} if {
 	true
 }
 `),
@@ -3651,10 +4562,10 @@ q = {a | a := true} {
 		},
 		{
 			note: "set comprehension value in function head (comprehension-local var)",
-			mod: MustParseModule(`package head
-f(x) = {a | a := true} {
+			mod: module(`package head
+f(x) = {a | a := true} if {
 	false
-} else = {a | a := true} {
+} else = {a | a := true} if {
 	true
 }
 `),
@@ -3662,22 +4573,22 @@ f(x) = {a | a := true} {
 		},
 		{
 			note: "set comprehension value in else-func head (reused arg rewrite)",
-			mod: MustParseModule(`package head
-f(x, y) = {x | y} { 
-	false 
-} else = {x | y} {
-	true 
+			mod: module(`package head
+f(x, y) = {x | y} if {
+	false
+} else = {x | y} if {
+	true
 }
 `),
 			exp: MustParseRule(`f(__local0__, __local1__) = __local2__ { false; __local2__ = {__local0__ | __local1__} } else = __local3__ { true; __local3__ = {__local0__ | __local1__} }`),
 		},
 		{
 			note: "import in else value",
-			mod: MustParseModule(`package head
+			mod: module(`package head
 import input.qux as baz
-elsekw {
+elsekw if {
 	false
-} else = baz {
+} else = baz if {
 	true
 }
 `),
@@ -3685,7 +4596,7 @@ elsekw {
 		},
 		{
 			note: "import ref in last ref head term",
-			mod: MustParseModule(`package head
+			mod: module(`package head
 import data.doc1 as bar
 x.y.z[bar[i]] = true
 `),
@@ -3693,9 +4604,7 @@ x.y.z[bar[i]] = true
 		},
 		{
 			note: "import ref in multi-value ref rule",
-			mod: MustParseModule(`package head
-import future.keywords.if
-import future.keywords.contains
+			mod: module(`package head
 import data.doc1 as bar
 x.y.w contains bar[i] if true
 `),
@@ -3812,13 +4721,13 @@ func TestCompilerRewriteRegoMetadataCalls(t *testing.T) {
 			note: "rego.metadata called, no metadata",
 			module: `package test
 
-p {
+p if {
 	rego.metadata.chain()[0].path == ["test", "p"]
 	rego.metadata.rule() == {}
 }`,
 			exp: `package test
 
-p = true {
+p = true if {
 	__local2__ = [{"path": ["test", "p"]}]
 	__local3__ = {}
 	__local0__ = __local2__
@@ -3831,13 +4740,13 @@ p = true {
 			note: "rego.metadata called, no output var, no metadata",
 			module: `package test
 
-p {
+p if {
 	rego.metadata.chain()
 	rego.metadata.rule()
 }`,
 			exp: `package test
 
-p = true {
+p = true if {
 	__local0__ = [{"path": ["test", "p"]}]
 	__local1__ = {}
 	__local0__
@@ -3852,14 +4761,14 @@ package test
 
 # METADATA
 # title: My P Rule
-p {
+p if {
 	rego.metadata.chain()[0].title == "My P Rule"
 	rego.metadata.chain()[1].description == "A test package"
 }
 
 # METADATA
 # title: My Other P Rule
-p {
+p if {
 	rego.metadata.rule().title == "My Other P Rule"
 }`,
 			exp: `# METADATA
@@ -3868,7 +4777,7 @@ package test
 
 # METADATA
 # {"scope":"rule","title":"My P Rule"}
-p = true {
+p = true if {
 	__local3__ = [
 		{"annotations": {"scope": "rule", "title": "My P Rule"}, "path": ["test", "p"]},
 		{"annotations": {"description": "A test package", "scope": "package"}, "path": ["test"]}
@@ -3881,7 +4790,7 @@ p = true {
 
 # METADATA
 # {"scope":"rule","title":"My Other P Rule"}
-p = true {
+p = true if {
 	__local4__ = {"scope": "rule", "title": "My Other P Rule"}
 	__local2__ = __local4__
 	equal(__local2__.title, "My Other P Rule")
@@ -3893,7 +4802,7 @@ p = true {
 # description: TEST
 package test
 
-p {
+p if {
 	rego.metadata.chain()[0].path == ["test", "p"]
 	rego.metadata.chain()[1].path == ["test"]
 }`,
@@ -3901,7 +4810,7 @@ p {
 # {"scope":"package","description":"TEST"}
 package test
 
-p = true {
+p = true if {
 	__local2__ = [
 		{"path": ["test", "p"]},
 		{"annotations": {"description": "TEST", "scope": "package"}, "path": ["test"]}
@@ -3918,7 +4827,7 @@ p = true {
 p := rego.metadata.chain()`,
 			exp: `package test
 
-p := __local0__ {
+p := __local0__ if {
 	__local1__ = [{"path": ["test", "p"]}]
 	true
 	__local0__ = __local1__
@@ -3928,22 +4837,22 @@ p := __local0__ {
 			note: "rego.metadata argument in function call",
 			module: `package test
 
-p {
+p if {
 	q(rego.metadata.chain())
 }
 
-q(s) {
+q(s) if {
 	s == ["test", "p"]
 }`,
 			exp: `package test
 
-p = true {
+p = true if {
 	__local2__ = [{"path": ["test", "p"]}]
 	__local1__ = __local2__
 	data.test.q(__local1__)
 }
 
-q(__local0__) = true {
+q(__local0__) = true if {
 	equal(__local0__, ["test", "p"])
 }`,
 		},
@@ -3954,7 +4863,7 @@ q(__local0__) = true {
 p = [x | x := rego.metadata.chain()]`,
 			exp: `package test
 
-p = [__local0__ | __local1__ = __local2__; __local0__ = __local1__] {
+p = [__local0__ | __local1__ = __local2__; __local0__ = __local1__] if {
 	__local2__ = [{"path": ["test", "p"]}]
 	true
 }`,
@@ -3963,13 +4872,13 @@ p = [__local0__ | __local1__ = __local2__; __local0__ = __local1__] {
 			note: "rego.metadata used in nested array comprehension",
 			module: `package test
 
-p {
+p if {
 	y := [x | x := rego.metadata.chain()]
 	y[0].path == ["test", "p"]
 }`,
 			exp: `package test
 
-p = true {
+p = true if {
 	__local3__ = [{"path": ["test", "p"]}];
 	__local1__ = [__local0__ | __local2__ = __local3__; __local0__ = __local2__];
 	equal(__local1__[0].path, ["test", "p"])
@@ -3982,7 +4891,7 @@ p = true {
 p = {x | x := rego.metadata.chain()}`,
 			exp: `package test
 
-p = {__local0__ | __local1__ = __local2__; __local0__ = __local1__} {
+p = {__local0__ | __local1__ = __local2__; __local0__ = __local1__} if {
 	__local2__ = [{"path": ["test", "p"]}]
 	true
 }`,
@@ -3991,13 +4900,13 @@ p = {__local0__ | __local1__ = __local2__; __local0__ = __local1__} {
 			note: "rego.metadata used in nested set comprehension",
 			module: `package test
 
-p {
+p if {
 	y := {x | x := rego.metadata.chain()}
 	y[0].path == ["test", "p"]
 }`,
 			exp: `package test
 
-p = true {
+p = true if {
 	__local3__ = [{"path": ["test", "p"]}]
 	__local1__ = {__local0__ | __local2__ = __local3__; __local0__ = __local2__}
 	equal(__local1__[0].path, ["test", "p"])
@@ -4010,7 +4919,7 @@ p = true {
 p = {i: x | x := rego.metadata.chain()[i]}`,
 			exp: `package test
 
-p = {i: __local0__ | __local1__ = __local2__; __local0__ = __local1__[i]} {
+p = {i: __local0__ | __local1__ = __local2__; __local0__ = __local1__[i]} if {
 	__local2__ = [{"path": ["test", "p"]}]
 	true
 }`,
@@ -4019,13 +4928,13 @@ p = {i: __local0__ | __local1__ = __local2__; __local0__ = __local1__[i]} {
 			note: "rego.metadata used in nested object comprehension",
 			module: `package test
 
-p {
+p if {
 	y := {i: x | x := rego.metadata.chain()[i]}
 	y[0].path == ["test", "p"]
 }`,
 			exp: `package test
 
-p = true {
+p = true if {
 	__local3__ = [{"path": ["test", "p"]}]
 	__local1__ = {i: __local0__ | __local2__ = __local3__; __local0__ = __local2__[i]}
 	equal(__local1__[0].path, ["test", "p"])
@@ -4037,13 +4946,17 @@ p = true {
 		t.Run(tc.note, func(t *testing.T) {
 			c := NewCompiler()
 			c.Modules = map[string]*Module{
-				"test.rego": MustParseModule(tc.module),
+				"test.rego": module(tc.module),
 			}
 			compileStages(c, c.rewriteRegoMetadataCalls)
 			assertNotFailed(t, c)
 
 			result := c.Modules["test.rego"]
-			exp := MustParseModuleWithOpts(tc.exp, ParserOptions{ProcessAnnotation: true})
+			exp := MustParseModuleWithOpts(tc.exp, ParserOptions{
+				AllFutureKeywords:  true,
+				unreleasedKeywords: true,
+				ProcessAnnotation:  true,
+			})
 
 			if result.Compare(exp) != 0 {
 				t.Fatalf("\nExpected:\n\n%v\n\nGot:\n\n%v", exp, result)
@@ -4076,15 +4989,16 @@ func TestCompilerRewriteLocalAssignments(t *testing.T) {
 		module          string
 		exp             interface{}
 		expRewrittenMap map[Var]Var
+		regoVersion     RegoVersion
 	}{
 		{
 			module: `
 				package test
-				body { a := 1; a > 0 }
+				body if { a := 1; a > 0 }
 			`,
 			exp: `
 				package test
-				body = true { __local0__ = 1; gt(__local0__, 0) }
+				body = true if { __local0__ = 1; gt(__local0__, 0) }
 			`,
 			expRewrittenMap: map[Var]Var{
 				Var("__local0__"): Var("a"),
@@ -4093,11 +5007,11 @@ func TestCompilerRewriteLocalAssignments(t *testing.T) {
 		{
 			module: `
 				package test
-				head_vars(a) = b { b := a }
+				head_vars(a) = b if { b := a }
 			`,
 			exp: `
 				package test
-				head_vars(__local0__) = __local1__ { __local1__ = __local0__ }
+				head_vars(__local0__) = __local1__ if { __local1__ = __local0__ }
 			`,
 			expRewrittenMap: map[Var]Var{
 				Var("__local0__"): Var("a"),
@@ -4107,11 +5021,11 @@ func TestCompilerRewriteLocalAssignments(t *testing.T) {
 		{
 			module: `
 				package test
-				head_key[a] { a := 1 }
+				head_key contains a if { a := 1 }
 			`,
 			exp: `
 				package test
-				head_key[__local0__] { __local0__ = 1 }
+				head_key contains __local0__ if { __local0__ = 1 }
 			`,
 			expRewrittenMap: map[Var]Var{
 				Var("__local0__"): Var("a"),
@@ -4120,11 +5034,11 @@ func TestCompilerRewriteLocalAssignments(t *testing.T) {
 		{
 			module: `
 				package test
-				head_unsafe_var[a] { some a }
+				head_unsafe_var contains a if { some a }
 			`,
 			exp: `
 				package test
-				head_unsafe_var[__local0__] { true }
+				head_unsafe_var contains __local0__ if { true }
 			`,
 			expRewrittenMap: map[Var]Var{
 				Var("__local0__"): Var("a"),
@@ -4135,14 +5049,14 @@ func TestCompilerRewriteLocalAssignments(t *testing.T) {
 				package test
 				p = {1,2,3}
 				x = 4
-				head_nested[p[x]] {
+				head_nested contains p[x] if {
 					some x
 				}`,
 			exp: `
 					package test
 					p = {1,2,3}
 					x = 4
-					head_nested[data.test.p[__local0__]]
+					head_nested contains data.test.p[__local0__]
 			`,
 			expRewrittenMap: map[Var]Var{
 				Var("__local0__"): Var("x"),
@@ -4152,14 +5066,14 @@ func TestCompilerRewriteLocalAssignments(t *testing.T) {
 			module: `
 				package test
 				p = {1,2}
-				head_closure_nested[p[x]] {
+				head_closure_nested contains p[x] if {
 					y = [true | some x; x = 1]
 				}
 			`,
 			exp: `
 				package test
 				p = {1,2}
-				head_closure_nested[data.test.p[x]] {
+				head_closure_nested contains data.test.p[x] if {
 					y = [true | __local0__ = 1]
 				}
 			`,
@@ -4170,14 +5084,14 @@ func TestCompilerRewriteLocalAssignments(t *testing.T) {
 		{
 			module: `
 				package test
-				nested {
+				nested if {
 					a := [1,2,3]
 					x := [true | a[i] > 1]
 				}
 			`,
 			exp: `
 				package test
-				nested = true { __local0__ = [1, 2, 3]; __local1__ = [true | gt(__local0__[i], 1)] }
+				nested = true if { __local0__ = [1, 2, 3]; __local1__ = [true | gt(__local0__[i], 1)] }
 			`,
 			expRewrittenMap: map[Var]Var{
 				Var("__local0__"): Var("a"),
@@ -4188,12 +5102,12 @@ func TestCompilerRewriteLocalAssignments(t *testing.T) {
 			module: `
 				package test
 				x = 2
-				shadow_globals[x] { x := 1 }
+				shadow_globals contains x if { x := 1 }
 			`,
 			exp: `
 				package test
-				x = 2 { true }
-				shadow_globals[__local0__] { __local0__ = 1 }
+				x = 2 if { true }
+				shadow_globals contains __local0__ if { __local0__ = 1 }
 			`,
 			expRewrittenMap: map[Var]Var{
 				Var("__local0__"): Var("x"),
@@ -4202,11 +5116,11 @@ func TestCompilerRewriteLocalAssignments(t *testing.T) {
 		{
 			module: `
 				package test
-				shadow_rule[shadow_rule] { shadow_rule := 1 }
+				shadow_rule contains shadow_rule if { shadow_rule := 1 }
 			`,
 			exp: `
 				package test
-				shadow_rule[__local0__] { __local0__ = 1 }
+				shadow_rule contains __local0__ if { __local0__ = 1 }
 			`,
 			expRewrittenMap: map[Var]Var{
 				Var("__local0__"): Var("shadow_rule"),
@@ -4225,6 +5139,7 @@ func TestCompilerRewriteLocalAssignments(t *testing.T) {
 				Var("__local0__"): Var("data"),
 				Var("__local1__"): Var("input"),
 			},
+			regoVersion: RegoV0, // shadowing only allowed in v0
 		},
 		{
 			module: `
@@ -4238,25 +5153,32 @@ func TestCompilerRewriteLocalAssignments(t *testing.T) {
 			expRewrittenMap: map[Var]Var{
 				Var("__local0__"): Var("input"),
 			},
+			regoVersion: RegoV0, // shadowing only allowed in v0
 		},
 		{
 			module: `
 				package test
-				skip_with_target { a := 1; input := 2; data.p with input as a }
+				skip_with_target {
+					a := 1
+					input := 2
+					data.p with input as a
+					data.p with input.foo as a
+				}
 			`,
 			exp: `
 				package test
-				skip_with_target = true { __local0__ = 1; __local1__ = 2; data.p with input as __local0__ }
+				skip_with_target = true { __local0__ = 1; __local1__ = 2; data.p with input as __local0__; data.p with input.foo as __local0__ }
 			`,
 			expRewrittenMap: map[Var]Var{
 				Var("__local0__"): Var("a"),
 				Var("__local1__"): Var("input"),
 			},
+			regoVersion: RegoV0, // shadowing only allowed in v0
 		},
 		{
 			module: `
 				package test
-				shadow_comprehensions {
+				shadow_comprehensions if {
 					a := 1
 					[true | a := 2; b := 1]
 					b := 2
@@ -4264,7 +5186,7 @@ func TestCompilerRewriteLocalAssignments(t *testing.T) {
 			`,
 			exp: `
 				package test
-				shadow_comprehensions = true { __local0__ = 1; [true | __local1__ = 2; __local2__ = 1]; __local3__ = 2 }
+				shadow_comprehensions = true if { __local0__ = 1; [true | __local1__ = 2; __local2__ = 1]; __local3__ = 2 }
 			`,
 			expRewrittenMap: map[Var]Var{
 				Var("__local0__"): Var("a"),
@@ -4276,14 +5198,14 @@ func TestCompilerRewriteLocalAssignments(t *testing.T) {
 		{
 			module: `
 				package test
-					scoping {
+					scoping if {
 						[true | a := 1]
 						[true | a := 2]
 					}
 			`,
 			exp: `
 				package test
-				scoping = true { [true | __local0__ = 1]; [true | __local1__ = 2] }
+				scoping = true if { [true | __local0__ = 1]; [true | __local1__ = 2] }
 			`,
 			expRewrittenMap: map[Var]Var{
 				Var("__local0__"): Var("a"),
@@ -4293,13 +5215,13 @@ func TestCompilerRewriteLocalAssignments(t *testing.T) {
 		{
 			module: `
 				package test
-				object_keys {
+				object_keys if {
 					{k: v1, "k2": v2} := {"foo": 1, "k2": 2}
 				}
 			`,
 			exp: `
 				package test
-				object_keys = true { {"k2": __local0__, k: __local1__} = {"foo": 1, "k2": 2} }
+				object_keys = true if { {"k2": __local0__, k: __local1__} = {"foo": 1, "k2": 2} }
 			`,
 			expRewrittenMap: map[Var]Var{
 				Var("__local0__"): Var("v2"),
@@ -4310,14 +5232,14 @@ func TestCompilerRewriteLocalAssignments(t *testing.T) {
 			module: `
 				package test
 				head_array_comprehensions = [[x] | x := 1]
-					head_set_comprehensions = {[x] | x := 1}
-					head_object_comprehensions = {k: [x] | k := "foo"; x := 1}
+				head_set_comprehensions = {[x] | x := 1}
+				head_object_comprehensions = {k: [x] | k := "foo"; x := 1}
 			`,
 			exp: `
 				package test
-				head_array_comprehensions = [[__local0__] | __local0__ = 1] { true }
-				head_set_comprehensions = {[__local1__] | __local1__ = 1} { true }
-				head_object_comprehensions = {__local2__: [__local3__] | __local2__ = "foo"; __local3__ = 1} { true }
+				head_array_comprehensions = [[__local0__] | __local0__ = 1] if { true }
+				head_set_comprehensions = {[__local1__] | __local1__ = 1} if { true }
+				head_object_comprehensions = {__local2__: [__local3__] | __local2__ = "foo"; __local3__ = 1} if { true }
 			`,
 			expRewrittenMap: map[Var]Var{
 				Var("__local0__"): Var("x"),
@@ -4329,14 +5251,14 @@ func TestCompilerRewriteLocalAssignments(t *testing.T) {
 		{
 			module: `
 				package test
-				rewritten_object_key {
+				rewritten_object_key if {
 					k := "foo"
 					{k: 1}
 				}
 			`,
 			exp: `
 				package test
-				rewritten_object_key = true { __local0__ = "foo"; {__local0__: 1} }
+				rewritten_object_key = true if { __local0__ = "foo"; {__local0__: 1} }
 			`,
 			expRewrittenMap: map[Var]Var{
 				Var("__local0__"): Var("k"),
@@ -4345,13 +5267,13 @@ func TestCompilerRewriteLocalAssignments(t *testing.T) {
 		{
 			module: `
 				package test
-				rewritten_object_key_head[[{k: 1}]] {
+				rewritten_object_key_head contains [{k: 1}] if {
 					k := "foo"
 				}
 			`,
 			exp: `
 				package test
-				rewritten_object_key_head[[{__local0__: 1}]] { __local0__ = "foo" }
+				rewritten_object_key_head contains [{__local0__: 1}] if { __local0__ = "foo" }
 			`,
 			expRewrittenMap: map[Var]Var{
 				Var("__local0__"): Var("k"),
@@ -4360,13 +5282,13 @@ func TestCompilerRewriteLocalAssignments(t *testing.T) {
 		{
 			module: `
 				package test
-				rewritten_object_key_head_value = [{k: 1}] {
+				rewritten_object_key_head_value = [{k: 1}] if {
 					k := "foo"
 				}
 			`,
 			exp: `
 				package test
-				rewritten_object_key_head_value = [{__local0__: 1}] { __local0__ = "foo" }
+				rewritten_object_key_head_value = [{__local0__: 1}] if { __local0__ = "foo" }
 			`,
 			expRewrittenMap: map[Var]Var{
 				Var("__local0__"): Var("k"),
@@ -4377,29 +5299,30 @@ func TestCompilerRewriteLocalAssignments(t *testing.T) {
 				package test
 				skip_with_target_in_assignment {
 					input := 1
-					a := [true | true with input as 2; true with input as 3]
+					a := [true | true with input as 2; true with input.foo as 3]
 				}
 			`,
 			exp: `
 				package test
-				skip_with_target_in_assignment = true { __local0__ = 1; __local1__ = [true | true with input as 2; true with input as 3] }
+				skip_with_target_in_assignment = true { __local0__ = 1; __local1__ = [true | true with input as 2; true with input.foo as 3] }
 			`,
 			expRewrittenMap: map[Var]Var{
 				Var("__local0__"): Var("input"),
 				Var("__local1__"): Var("a"),
 			},
+			regoVersion: RegoV0, // shadowing only allowed in v0
 		},
 		{
 			module: `
 				package test
-				rewrite_with_value_in_assignment {
+				rewrite_with_value_in_assignment if {
 					a := 1
 					b := 1 with input as [a]
 				}
 			`,
 			exp: `
 				package test
-				rewrite_with_value_in_assignment = true { __local0__ = 1; __local1__ = 1 with input as [__local0__] }
+				rewrite_with_value_in_assignment = true if { __local0__ = 1; __local1__ = 1 with input as [__local0__] }
 			`,
 			expRewrittenMap: map[Var]Var{
 				Var("__local0__"): Var("a"),
@@ -4409,14 +5332,14 @@ func TestCompilerRewriteLocalAssignments(t *testing.T) {
 		{
 			module: `
 				package test
-				rewrite_with_value_in_expr {
+				rewrite_with_value_in_expr if {
 					a := 1
 					a > 0 with input as [a]
 				}
 			`,
 			exp: `
 				package test
-				rewrite_with_value_in_expr = true { __local0__ = 1; gt(__local0__, 0) with input as [__local0__] }
+				rewrite_with_value_in_expr = true if { __local0__ = 1; gt(__local0__, 0) with input as [__local0__] }
 			`,
 			expRewrittenMap: map[Var]Var{
 				Var("__local0__"): Var("a"),
@@ -4425,14 +5348,14 @@ func TestCompilerRewriteLocalAssignments(t *testing.T) {
 		{
 			module: `
 				package test
-				rewrite_nested_with_value_in_expr {
+				rewrite_nested_with_value_in_expr if {
 					a := 1
 					a > 0 with input as object.union({"a": a}, {"max_a": max([a])})
 				}
 			`,
 			exp: `
 				package test
-				rewrite_nested_with_value_in_expr = true { __local0__ = 1; gt(__local0__, 0) with input as object.union({"a": __local0__}, {"max_a": max([__local0__])}) }
+				rewrite_nested_with_value_in_expr = true if { __local0__ = 1; gt(__local0__, 0) with input as object.union({"a": __local0__}, {"max_a": max([__local0__])}) }
 			`,
 			expRewrittenMap: map[Var]Var{
 				Var("__local0__"): Var("a"),
@@ -4442,15 +5365,15 @@ func TestCompilerRewriteLocalAssignments(t *testing.T) {
 			module: `
 				package test
 				global = {}
-				ref_shadowed {
+				ref_shadowed if {
 					global := {"a": 1}
 					global.a > 0
 				}
 			`,
 			exp: `
 				package test
-				global = {} { true }
-				ref_shadowed = true { __local0__ = {"a": 1}; gt(__local0__.a, 0) }
+				global = {} if { true }
+				ref_shadowed = true if { __local0__ = {"a": 1}; gt(__local0__.a, 0) }
 			`,
 			expRewrittenMap: map[Var]Var{
 				Var("__local0__"): Var("global"),
@@ -4459,10 +5382,10 @@ func TestCompilerRewriteLocalAssignments(t *testing.T) {
 		{
 			module: `
 				package test
-				f(x) = y {
+				f(x) = y if {
 					x == 1
 					y := 2
-				} else = y {
+				} else = y if {
 					x == 3
 					y := 4
 				}
@@ -4471,10 +5394,10 @@ func TestCompilerRewriteLocalAssignments(t *testing.T) {
 			// args will be rewritten. Since we cannot currently redefine the
 			// args, we must parse the module and then manually update the args.
 			exp: func() *Module {
-				module := MustParseModule(`
+				module := module(`
 					package test
 
-					f(__local0__) = __local1__ { __local0__ == 1; __local1__ = 2 } else = __local2__ { __local0__ == 3; __local2__ = 4 }
+					f(__local0__) = __local1__ if { __local0__ == 1; __local1__ = 2 } else = __local2__ if { __local0__ == 3; __local2__ = 4 }
 				`)
 				module.Rules[0].Else.Head.Args[0].Value = Var("__local0__")
 				return module
@@ -4488,11 +5411,11 @@ func TestCompilerRewriteLocalAssignments(t *testing.T) {
 		{
 			module: `
 				package test
-				f({"x": [x]}) = y { x == 1; y := 2 }`,
+				f({"x": [x]}) = y if { x == 1; y := 2 }`,
 			exp: `
 				package test
 
-				f({"x": [__local0__]}) = __local1__ { __local0__ == 1; __local1__ = 2 }`,
+				f({"x": [__local0__]}) = __local1__ if { __local0__ == 1; __local1__ = 2 }`,
 			expRewrittenMap: map[Var]Var{
 				Var("__local0__"): Var("x"),
 				Var("__local1__"): Var("y"),
@@ -4502,12 +5425,12 @@ func TestCompilerRewriteLocalAssignments(t *testing.T) {
 			module: `
 				package test
 
-				f(x, [x]) = x { x == 1 }
+				f(x, [x]) = x if { x == 1 }
 			`,
 			exp: `
 				package test
 
-				f(__local0__, [__local0__]) = __local0__ { __local0__ == 1 }
+				f(__local0__, [__local0__]) = __local0__ if { __local0__ == 1 }
 			`,
 			expRewrittenMap: map[Var]Var{
 				Var("__local0__"): Var("x"),
@@ -4517,12 +5440,12 @@ func TestCompilerRewriteLocalAssignments(t *testing.T) {
 			module: `
 				package test
 
-				f(x) = {x[0]: 1} { true }
+				f(x) = {x[0]: 1} if { true }
 			`,
 			exp: `
 				package test
 
-				f(__local0__) = {__local0__[0]: 1} { true }
+				f(__local0__) = {__local0__[0]: 1} if { true }
 			`,
 			expRewrittenMap: map[Var]Var{
 				Var("__local0__"): Var("x"),
@@ -4532,14 +5455,14 @@ func TestCompilerRewriteLocalAssignments(t *testing.T) {
 			module: `
 				package test
 
-				f({{t | t := 0}: 1}) {
+				f({{t | t := 0}: 1}) if {
 					true
 				}
 			`,
 			exp: `
 				package test
 
-				f({{__local0__ | __local0__ = 0}: 1}) { true }
+				f({{__local0__ | __local0__ = 0}: 1}) if { true }
 			`,
 			expRewrittenMap: map[Var]Var{
 				Var("__local0__"): Var("t"),
@@ -4549,14 +5472,14 @@ func TestCompilerRewriteLocalAssignments(t *testing.T) {
 			module: `
 				package test
 
-				f({{t | t := 0}}) {
+				f({{t | t := 0}}) if {
 					true
 				}
 			`,
 			exp: `
 				package test
 
-				f({{__local0__ | __local0__ = 0}}) { true }
+				f({{__local0__ | __local0__ = 0}}) if { true }
 			`,
 			expRewrittenMap: map[Var]Var{
 				Var("__local0__"): Var("t"),
@@ -4566,9 +5489,14 @@ func TestCompilerRewriteLocalAssignments(t *testing.T) {
 
 	for i, tc := range tests {
 		t.Run(fmt.Sprint(i), func(t *testing.T) {
+			setRegoVersion := func(po ParserOptions) ParserOptions {
+				po.RegoVersion = tc.regoVersion
+				return po
+			}
+
 			c := NewCompiler()
 			c.Modules = map[string]*Module{
-				"test.rego": MustParseModule(tc.module),
+				"test.rego": module(tc.module, setRegoVersion),
 			}
 			compileStages(c, c.rewriteLocalVars)
 			assertNotFailed(t, c)
@@ -4576,7 +5504,7 @@ func TestCompilerRewriteLocalAssignments(t *testing.T) {
 			var exp *Module
 			switch e := tc.exp.(type) {
 			case string:
-				exp = MustParseModule(e)
+				exp = module(e, setRegoVersion)
 			case func() *Module:
 				exp = e()
 			default:
@@ -4592,27 +5520,28 @@ func TestCompilerRewriteLocalAssignments(t *testing.T) {
 	}
 
 }
+
 func TestRewriteLocalVarDeclarationErrors(t *testing.T) {
 
 	c := NewCompiler()
 
-	c.Modules["test"] = MustParseModule(`package test
+	c.Modules["test"] = module(`package test
 
-	redeclaration {
+	redeclaration if {
 		r1 = 1
 		r1 := 2
 		r2 := 1
 		[b, r2] := [1, 2]
-		input.path == 1
-		input := "foo"
+		foo.path == 1
+		foo := "foo"
 		_ := [1 | nested := 1; nested := 2]
 	}
 
-	negation {
+	negation if {
 		not a := 1
 	}
 
-	bad_assign {
+	bad_assign if {
 		null := x
 		true := x
 		4.5 := x
@@ -4625,11 +5554,11 @@ func TestRewriteLocalVarDeclarationErrors(t *testing.T) {
 		[z, 1] := [1, 2]
 	}
 
-	arg_redeclared(arg1) {
+	arg_redeclared(arg1) if {
 		arg1 := 1
 	}
 
-	arg_nested_redeclared({{arg_nested| arg_nested := 1; arg_nested := 2}}) { true }
+	arg_nested_redeclared({{arg_nested| arg_nested := 1; arg_nested := 2}}) if { true }
 	`)
 
 	compileStages(c, c.rewriteLocalVars)
@@ -4637,7 +5566,7 @@ func TestRewriteLocalVarDeclarationErrors(t *testing.T) {
 	expectedErrors := []string{
 		"var r1 referenced above",
 		"var r2 assigned above",
-		"var input referenced above",
+		"var foo referenced above",
 		"var nested assigned above",
 		"arg arg1 redeclared",
 		"var arg_nested assigned above",
@@ -4691,7 +5620,7 @@ func TestRewriteDeclaredVarsStage(t *testing.T) {
 			module: `
 				package test
 
-				p {
+				p if {
 					a := {"a": "a"}
 					{a.a: a.a}
 				}
@@ -4699,7 +5628,7 @@ func TestRewriteDeclaredVarsStage(t *testing.T) {
 			exp: `
 				package test
 
-				p {
+				p if {
 					__local0__ = {"a": "a"}
 					{__local0__.a: __local0__.a}
 				}
@@ -4710,7 +5639,7 @@ func TestRewriteDeclaredVarsStage(t *testing.T) {
 			module: `
 				package test
 
-				p {
+				p if {
 					a := {"a": "a"}
 					{a.a}
 				}
@@ -4718,7 +5647,7 @@ func TestRewriteDeclaredVarsStage(t *testing.T) {
 			exp: `
 				package test
 
-				p {
+				p if {
 					__local0__ = {"a": "a"}
 					{__local0__.a}
 				}
@@ -4732,12 +5661,12 @@ func TestRewriteDeclaredVarsStage(t *testing.T) {
 			c := NewCompiler()
 
 			c.Modules = map[string]*Module{
-				"test.rego": MustParseModule(tc.module),
+				"test.rego": module(tc.module),
 			}
 
 			compileStages(c, c.rewriteLocalVars)
 
-			exp := MustParseModule(tc.exp)
+			exp := module(tc.exp)
 			result := c.Modules["test.rego"]
 
 			if !exp.Equal(result) {
@@ -4760,13 +5689,13 @@ func TestRewriteDeclaredVars(t *testing.T) {
 				package test
 				x = 1
 				y = 2
-				p { some x; input = [x, y] }
+				p if { some x; input = [x, y] }
 			`,
 			exp: `
 				package test
 				x = 1
 				y = 2
-				p { __local1__ = data.test.y; input = [__local0__, __local1__] }
+				p if { __local1__ = data.test.y; input = [__local0__, __local1__] }
 			`,
 		},
 		{
@@ -4775,13 +5704,13 @@ func TestRewriteDeclaredVars(t *testing.T) {
 				package test
 				x = []
 				y = {}
-				p { some x; walk(y, [x, y]) }
+				p if { some x; walk(y, [x, y]) }
 			`,
 			exp: `
 				package test
 				x = []
 				y = {}
-				p { __local1__ = data.test.y; __local2__ = data.test.y; walk(__local1__, [__local0__, __local2__]) }
+				p if { __local1__ = data.test.y; __local2__ = data.test.y; walk(__local1__, [__local0__, __local2__]) }
 			`,
 		},
 		{
@@ -4790,15 +5719,49 @@ func TestRewriteDeclaredVars(t *testing.T) {
 				package test
 				x = "a"
 				y = 1
-				q[[2, "b"]]
-				p { some x; q[[y,x]] }
+				q contains [2, "b"]
+				p if { some x; q[[y,x]] }
 			`,
 			exp: `
 				package test
 				x = "a"
 				y = 1
-				q[[2, "b"]]
-				p { __local1__ = data.test.y; data.test.q[[__local1__, __local0__]] }
+				q contains [2, "b"]
+				p if { __local1__ = data.test.y; data.test.q[[__local1__, __local0__]] }
+			`,
+		},
+		{
+			note: "with: rewrite target",
+			module: `
+				package test
+				p if {
+					x := "foo"
+					true with input[x] as 1
+				}
+			`,
+			exp: `
+				package test
+				p if {
+					__local0__ = "foo";
+					true with input[__local0__] as 1
+				}
+			`,
+		},
+		{
+			note: "with: rewrite target in comprehension term",
+			module: `
+				package test
+				p if {
+					foo := "bar"
+					{ { 2 | true with input[foo] as 1} | true }
+				}
+			`,
+			exp: `
+				package test
+				p if {
+					__local0__ = "bar"
+					{__local1__ | true; __local1__ = { 2 | true with input[__local0__] as 1 }}
+				}
 			`,
 		},
 		{
@@ -4806,7 +5769,7 @@ func TestRewriteDeclaredVars(t *testing.T) {
 			module: `
 				package test
 
-				p.r.q[s] = t {
+				p.r.q[s] = t if {
 					t := 1
 					s := input.foo
 				}
@@ -4814,7 +5777,7 @@ func TestRewriteDeclaredVars(t *testing.T) {
 			exp: `
 				package test
 
-				p.r.q[__local1__] = __local0__ {
+				p.r.q[__local1__] = __local0__ if {
 					__local0__ = 1
 					__local1__ = input.foo
 				}
@@ -4826,12 +5789,12 @@ func TestRewriteDeclaredVars(t *testing.T) {
 				package test
 				import future.keywords.in
 				xs = ["a", "b", "c"]
-				p { some x in xs; x == "a" }
+				p if { some x in xs; x == "a" }
 			`,
 			exp: `
 				package test
 				xs = ["a", "b", "c"]
-				p { __local2__ = data.test.xs[__local1__]; __local2__ = "a" }
+				p if { __local2__ = data.test.xs[__local1__]; __local2__ = "a" }
 			`,
 		},
 		{
@@ -4840,12 +5803,12 @@ func TestRewriteDeclaredVars(t *testing.T) {
 				package test
 				import future.keywords.in
 				xs = ["a", "b", "c"]
-				p { some k, x in xs; x == "a"; k == 2 }
+				p if { some k, x in xs; x == "a"; k == 2 }
 			`,
 			exp: `
 				package test
 				xs = ["a", "b", "c"]
-				p { __local1__ = data.test.xs[__local0__]; __local1__ = "a"; __local0__ = 2 }
+				p if { __local1__ = data.test.xs[__local0__]; __local1__ = "a"; __local0__ = 2 }
 			`,
 		},
 		{
@@ -4854,7 +5817,7 @@ func TestRewriteDeclaredVars(t *testing.T) {
 				package test
 				import future.keywords.in
 				xs = [["a", "b", "c"], []]
-				p {
+				p if {
 					some i
 					some k, x in xs[i]
 					x == "a"
@@ -4864,7 +5827,7 @@ func TestRewriteDeclaredVars(t *testing.T) {
 			exp: `
 				package test
 				xs = [["a", "b", "c"], []]
-				p = true { __local2__ = data.test.xs[__local0__][__local1__]; __local2__ = "a"; __local1__ = 2 }
+				p = true if { __local2__ = data.test.xs[__local0__][__local1__]; __local2__ = "a"; __local1__ = 2 }
 			`,
 		},
 		{
@@ -4874,7 +5837,7 @@ func TestRewriteDeclaredVars(t *testing.T) {
 				import future.keywords.in
 				i = 0
 				xs = [["a", "b", "c"], []]
-				p {
+				p if {
 					some k, x in xs[i]
 					x == "a"
 					k == 2
@@ -4884,14 +5847,14 @@ func TestRewriteDeclaredVars(t *testing.T) {
 				package test
 				i = 0
 				xs = [["a", "b", "c"], []]
-				p = true { __local2__ = data.test.i; __local1__ = data.test.xs[__local2__][__local0__]; __local1__ = "a"; __local0__ = 2 }
+				p = true if { __local2__ = data.test.i; __local1__ = data.test.xs[__local2__][__local0__]; __local1__ = "a"; __local0__ = 2 }
 			`,
 		},
 		{
 			note: "rewrite some: with modifier on domain",
 			module: `
 				package test
-				p {
+				p if {
 					some k, x in input with input as [1, 1, 1]
 					k == 0
 					x == 1
@@ -4899,7 +5862,7 @@ func TestRewriteDeclaredVars(t *testing.T) {
 			`,
 			exp: `
 				package test
-				p {
+				p if {
 					__local1__ = input[__local0__] with input as [1, 1, 1]
 					__local0__ = 0
 					__local1__ = 1
@@ -4916,7 +5879,7 @@ func TestRewriteDeclaredVars(t *testing.T) {
 				xs = [1, 2]
 				k = "foo"
 				v = "bar"
-				p {
+				p if {
 					every k, v in xs { k + v > i }
 				}
 			`,
@@ -4926,7 +5889,7 @@ func TestRewriteDeclaredVars(t *testing.T) {
 				xs = [1, 2]
 				k = "foo"
 				v = "bar"
-				p = true {
+				p = true if {
 					__local2__ = data.test.xs
 					every __local0__, __local1__ in __local2__ {
 						plus(__local0__, __local1__, __local3__)
@@ -4941,7 +5904,7 @@ func TestRewriteDeclaredVars(t *testing.T) {
 				package test
 				# import future.keywords.in
 				# import future.keywords.every
-				p {
+				p if {
 					every k, v in [1] { v >= 1 }
 				}
 			`,
@@ -4957,13 +5920,13 @@ func TestRewriteDeclaredVars(t *testing.T) {
 			module: `
 				package test
 
-				p {
+				p if {
 					every __local0__, v in [1] { v >= 1 }
 				}
 			`,
 			exp: `
 				package test
-				p = true {
+				p = true if {
 					__local3__ = [1]
 					every __local1__, __local2__ in __local3__ { __local2__ >= 1 }
 				}
@@ -4975,7 +5938,7 @@ func TestRewriteDeclaredVars(t *testing.T) {
 				package test
 				# import future.keywords.in
 				# import future.keywords.every
-				p {
+				p if {
 					every v in [1] { true }
 				}
 			`,
@@ -4987,13 +5950,13 @@ func TestRewriteDeclaredVars(t *testing.T) {
 				package test
 				# import future.keywords.in
 				# import future.keywords.every
-				p {
+				p if {
 					every k, _ in [1] { k >= 0 }
 				}
 			`,
 			exp: `
 				package test
-				p = true {
+				p = true if {
 					__local1__ = [1]
 					every __local0__, _ in __local1__ { gte(__local0__, 0) }
 				}
@@ -5005,13 +5968,13 @@ func TestRewriteDeclaredVars(t *testing.T) {
 				package test
 				# import future.keywords.in
 				# import future.keywords.every
-				p {
+				p if {
 					every _, _ in [1] { true }
 				}
 			`,
 			exp: `
 				package test
-				p = true { __local0__ = [1]; every _, _ in __local0__ { true } }
+				p = true if { __local0__ = [1]; every _, _ in __local0__ { true } }
 			`,
 		},
 		{
@@ -5020,7 +5983,7 @@ func TestRewriteDeclaredVars(t *testing.T) {
 				package test
 				# import future.keywords.in
 				# import future.keywords.every
-				p {
+				p if {
 					some x
 					x = 10
 					every x in [1] { x == 1 }
@@ -5028,7 +5991,7 @@ func TestRewriteDeclaredVars(t *testing.T) {
 			`,
 			exp: `
 				package test
-				p = true {
+				p = true if {
 					__local0__ = 10
 					__local3__ = [1]
 					every __local1__, __local2__ in __local3__ { __local2__ = 1 }
@@ -5041,7 +6004,7 @@ func TestRewriteDeclaredVars(t *testing.T) {
 				package test
 				# import future.keywords.in
 				# import future.keywords.every
-				p {
+				p if {
 					some y
 					y = 10
 					every x in [1] { x == y }
@@ -5049,7 +6012,7 @@ func TestRewriteDeclaredVars(t *testing.T) {
 			`,
 			exp: `
 				package test
-				p = true {
+				p = true if {
 					__local0__ = 10
 					__local3__ = [1]
 					every __local1__, __local2__ in __local3__ {
@@ -5064,7 +6027,7 @@ func TestRewriteDeclaredVars(t *testing.T) {
 				package test
 				# import future.keywords.in
 				# import future.keywords.every
-				p[x] {
+				p contains x if {
 					some x
 					x = 10
 					every _ in [1] { true }
@@ -5072,7 +6035,7 @@ func TestRewriteDeclaredVars(t *testing.T) {
 			`,
 			exp: `
 				package test
-				p[__local0__] { __local0__ = 10; __local2__ = [1]; every __local1__, _ in __local2__ { true } }
+				p contains __local0__ if { __local0__ = 10; __local2__ = [1]; every __local1__, _ in __local2__ { true } }
 			`,
 		},
 		{
@@ -5081,7 +6044,7 @@ func TestRewriteDeclaredVars(t *testing.T) {
 				package test
 				# import future.keywords.in
 				# import future.keywords.every
-				p {
+				p if {
 					xs := [[1], [2]]
 					every v in [1] {
 						every w in xs[v] {
@@ -5092,7 +6055,7 @@ func TestRewriteDeclaredVars(t *testing.T) {
 			`,
 			exp: `
 				package test
-				p = true {
+				p = true if {
 					__local0__ = [[1], [2]]
 					__local5__ = [1]
 					every __local1__, __local2__ in __local5__ {
@@ -5110,13 +6073,13 @@ func TestRewriteDeclaredVars(t *testing.T) {
 				package test
 				# import future.keywords.in
 				# import future.keywords.every
-				p {
+				p if {
 					every x in input { x == 1 } with input as [1, 1, 1]
 				}
 			`,
 			exp: `
 				package test
-				p {
+				p if {
 					__local2__ = input with input as [1, 1, 1]
 					every __local0__, __local1__ in __local2__ {
 						__local1__ = 1
@@ -5130,14 +6093,14 @@ func TestRewriteDeclaredVars(t *testing.T) {
 				package test
 				# import future.keywords.in
 				# import future.keywords.every
-				p {
+				p if {
 					xs := [1, 2]
 					every x in input { x == 1 } with input as xs
 				}
 			`,
 			exp: `
 				package test
-				p {
+				p if {
 					__local0__ = [1, 2]
 					__local3__ = input with input as __local0__
 					every __local1__, __local2__ in __local3__ {
@@ -5152,17 +6115,37 @@ func TestRewriteDeclaredVars(t *testing.T) {
 				package test
 				# import future.keywords.in
 				# import future.keywords.every
-				p {
+				p if {
 					every x in [2] { x == input } with input as 2
 				}
 			`,
 			exp: `
 				package test
-				p {
+				p if {
 					__local2__ = [2] with input as 2
 					every __local0__, __local1__ in __local2__ {
 						__local1__ = input
 					} with input as 2
+				}
+			`,
+		},
+		{
+			note: "rewrite every: with modifier on body, using every's key+value",
+			module: `
+				package test
+				# import future.keywords.in
+				# import future.keywords.every
+				p if {
+					every x, y in input { true with data.test.q[x][y] as 100 }
+				}
+			`,
+			exp: `
+				package test
+				p if {
+				    __local2__ = input
+					every __local0__, __local1__ in __local2__ {
+						true with data.test.q[__local0__][__local1__] as 100
+					}
 				}
 			`,
 		},
@@ -5172,7 +6155,7 @@ func TestRewriteDeclaredVars(t *testing.T) {
 				package test
 				x = 1
 				y = 2
-				p {
+				p if {
 					some x, z
 					z = 3
 					[x | x = 2; y = 2; some z; z = 4]
@@ -5182,7 +6165,7 @@ func TestRewriteDeclaredVars(t *testing.T) {
 				package test
 				x = 1
 				y = 2
-				p {
+				p if {
 					__local1__ = 3
 					[__local0__ | __local0__ = 2; data.test.y = 2; __local2__ = 4]
 				}
@@ -5195,7 +6178,7 @@ func TestRewriteDeclaredVars(t *testing.T) {
 				x = "a"
 				y = 1
 				z = 2
-				p[x] = [y, z] {
+				p[x] = [y, z] if {
 					some x, z
 					x = "b"
 					z = 4
@@ -5205,7 +6188,7 @@ func TestRewriteDeclaredVars(t *testing.T) {
 				x = "a"
 				y = 1
 				z = 2
-				p[__local0__] = __local2__ {
+				p[__local0__] = __local2__ if {
 					__local0__ = "b"
 					__local1__ = 4;
 					__local3__ = data.test.y
@@ -5218,23 +6201,23 @@ func TestRewriteDeclaredVars(t *testing.T) {
 			module: `
 				package test
 
-				p {
+				p if {
 					f(input, "bar")
 				}
 
-				f(x, y) {
+				f(x, y) if {
 					x[y]
 				}
 				`,
 			exp: `
 				package test
 
-				p = true {
+				p = true if {
 					__local2__ = input;
 					data.test.f(__local2__, "bar")
 				}
 
-				f(__local0__, __local1__) = true {
+				f(__local0__, __local1__) = true if {
 					__local0__[__local1__]
 				}
 			`,
@@ -5243,7 +6226,7 @@ func TestRewriteDeclaredVars(t *testing.T) {
 			note: "redeclare err",
 			module: `
 				package test
-				p {
+				p if {
 					some x
 					some x
 				}
@@ -5254,7 +6237,7 @@ func TestRewriteDeclaredVars(t *testing.T) {
 			note: "redeclare assigned err",
 			module: `
 				package test
-				p {
+				p if {
 					x := 1
 					some x
 				}
@@ -5265,7 +6248,7 @@ func TestRewriteDeclaredVars(t *testing.T) {
 			note: "redeclare reference err",
 			module: `
 				package test
-				p {
+				p if {
 					data.q[x]
 					some x
 				}
@@ -5276,7 +6259,7 @@ func TestRewriteDeclaredVars(t *testing.T) {
 			note: "declare unused err",
 			module: `
 				package test
-				p {
+				p if {
 					some x
 				}
 			`,
@@ -5286,7 +6269,7 @@ func TestRewriteDeclaredVars(t *testing.T) {
 			note: "declare unsafe err",
 			module: `
 				package test
-				p[x] {
+				p contains x if {
 					some x
 					x == 1
 				}
@@ -5298,7 +6281,7 @@ func TestRewriteDeclaredVars(t *testing.T) {
 			module: `
 			package test
 
-			f([a]) {
+			f([a]) if {
 				some a
 				a = 1
 			}
@@ -5336,7 +6319,7 @@ func TestCheckUnusedFunctionArgVars(t *testing.T) {
 		{
 			note: "one of the two function args is not used - issue 5602 regression test",
 			module: `package test
-			func(x, y) {
+			func(x, y) if {
 				x = 1
 			}`,
 			expectedErrors: Errors{
@@ -5350,7 +6333,7 @@ func TestCheckUnusedFunctionArgVars(t *testing.T) {
 		{
 			note: "one of the two ref-head function args is not used",
 			module: `package test
-			a.b.c.func(x, y) {
+			a.b.c.func(x, y) if {
 				x = 1
 			}`,
 			expectedErrors: Errors{
@@ -5364,7 +6347,7 @@ func TestCheckUnusedFunctionArgVars(t *testing.T) {
 		{
 			note: "multiple unused argvar in scope - issue 5602 regression test",
 			module: `package test
-			func(x, y) {
+			func(x, y) if {
 				input.baz = 1
 				input.test == "foo"
 			}`,
@@ -5384,7 +6367,7 @@ func TestCheckUnusedFunctionArgVars(t *testing.T) {
 		{
 			note: "some unused argvar in scope - issue 5602 regression test",
 			module: `package test
-			func(x, y) {
+			func(x, y) if {
 				input.test == "foo"
 				x = 1
 			}`,
@@ -5399,7 +6382,7 @@ func TestCheckUnusedFunctionArgVars(t *testing.T) {
 		{
 			note: "wildcard argvar that's ignored - issue 5602 regression test",
 			module: `package test
-			func(x, _) {
+			func(x, _) if {
 				input.test == "foo"
 				x = 1
 			}`,
@@ -5408,7 +6391,7 @@ func TestCheckUnusedFunctionArgVars(t *testing.T) {
 		{
 			note: "wildcard argvar that's ignored - issue 5602 regression test",
 			module: `package test
-			func(x, _) {
+			func(x, _) if {
 				input.test == "foo"
 			 }`,
 			expectedErrors: Errors{
@@ -5422,7 +6405,7 @@ func TestCheckUnusedFunctionArgVars(t *testing.T) {
 		{
 			note: "argvar not used in body but in head - issue 5602 regression test",
 			module: `package test
-			func(x) := x {
+			func(x) := x if {
 				input.test == "foo"
 			}`,
 			expectedErrors: Errors{},
@@ -5431,7 +6414,7 @@ func TestCheckUnusedFunctionArgVars(t *testing.T) {
 			note: "argvar not used in body but in head value comprehension",
 			module: `package test
 			a := {"foo": 1}
-			func(x) := { x: v | v := a[x] } {
+			func(x) := { x: v | v := a[x] } if {
 				input.test == "foo"
 			}`,
 			expectedErrors: Errors{},
@@ -5440,9 +6423,9 @@ func TestCheckUnusedFunctionArgVars(t *testing.T) {
 			note: "argvar not used in body but in else-head value comprehension",
 			module: `package test
 			a := {"foo": 1}
-			func(x) {
+			func(x) if {
 				input.test == "foo"
-			} else := { x: v | v := a[x] } {
+			} else := { x: v | v := a[x] } if {
 				input.test == "bar"
 			}`,
 			expectedErrors: Errors{},
@@ -5451,7 +6434,7 @@ func TestCheckUnusedFunctionArgVars(t *testing.T) {
 			note: "argvar not used in body and shadowed in head value comprehension",
 			module: `package test
 			a := {"foo": 1}
-			func(x) := { x: v | x := "foo"; v := a[x] } {
+			func(x) := { x: v | x := "foo"; v := a[x] } if {
 				input.test == "foo"
 			}`,
 			expectedErrors: Errors{
@@ -5465,9 +6448,9 @@ func TestCheckUnusedFunctionArgVars(t *testing.T) {
 		{
 			note: "argvar used in primary body but not in else body",
 			module: `package test
-			func(x) {
+			func(x) if {
 				input.test == x
-			} else := false {
+			} else := false if {
 				input.test == "foo"
 			}`,
 			expectedErrors: Errors{},
@@ -5475,9 +6458,9 @@ func TestCheckUnusedFunctionArgVars(t *testing.T) {
 		{
 			note: "argvar used in primary body but not in else body (with wildcard)",
 			module: `package test
-			func(x, _) {
+			func(x, _) if {
 				input.test == x
-			} else := false {
+			} else := false if {
 				input.test == "foo"
 			}`,
 			expectedErrors: Errors{},
@@ -5485,9 +6468,9 @@ func TestCheckUnusedFunctionArgVars(t *testing.T) {
 		{
 			note: "argvar not used in primary body but in else body",
 			module: `package test
-			func(x) {
+			func(x) if {
 				input.test == "foo"
-			} else := false {
+			} else := false if {
 				input.test == x
 			}`,
 			expectedErrors: Errors{},
@@ -5495,9 +6478,9 @@ func TestCheckUnusedFunctionArgVars(t *testing.T) {
 		{
 			note: "argvar not used in primary body but in else body (with wildcard)",
 			module: `package test
-			func(x, _) {
+			func(x, _) if {
 				input.test == "foo"
-			} else := false {
+			} else := false if {
 				input.test == x
 			}`,
 			expectedErrors: Errors{},
@@ -5505,7 +6488,7 @@ func TestCheckUnusedFunctionArgVars(t *testing.T) {
 		{
 			note: "argvar used in primary body but not in implicit else body",
 			module: `package test
-			func(x) {
+			func(x) if {
 				input.test == x
 			} else := false`,
 			expectedErrors: Errors{},
@@ -5513,11 +6496,11 @@ func TestCheckUnusedFunctionArgVars(t *testing.T) {
 		{
 			note: "argvars usage spread over multiple bodies",
 			module: `package test
-			func(x, y, z) {
+			func(x, y, z) if {
 				input.test == x
-			} else {
+			} else if {
 				input.test == y
-			} else {
+			} else if {
 				input.test == z
 			}`,
 			expectedErrors: Errors{},
@@ -5525,11 +6508,11 @@ func TestCheckUnusedFunctionArgVars(t *testing.T) {
 		{
 			note: "argvars usage spread over multiple bodies, missing in first",
 			module: `package test
-			func(x, y, z) {
+			func(x, y, z) if {
 				input.test == "foo"
-			} else {
+			} else if {
 				input.test == y
-			} else {
+			} else if {
 				input.test == z
 			}`,
 			expectedErrors: Errors{
@@ -5543,11 +6526,11 @@ func TestCheckUnusedFunctionArgVars(t *testing.T) {
 		{
 			note: "argvars usage spread over multiple bodies, missing in second",
 			module: `package test
-			func(x, y, z) {
+			func(x, y, z) if {
 				input.test == x
-			} else {
+			} else if {
 				input.test == "bar"
-			} else {
+			} else if {
 				input.test == z
 			}`,
 			expectedErrors: Errors{
@@ -5561,11 +6544,11 @@ func TestCheckUnusedFunctionArgVars(t *testing.T) {
 		{
 			note: "argvars usage spread over multiple bodies, missing in third",
 			module: `package test
-			func(x, y, z) {
+			func(x, y, z) if {
 				input.test == x
-			} else {
+			} else if {
 				input.test == y
-			} else {
+			} else if {
 				input.test == "baz"
 			}`,
 			expectedErrors: Errors{
@@ -5595,7 +6578,7 @@ func TestCheckUnusedFunctionArgVars(t *testing.T) {
 		t.Run(tc.note, func(t *testing.T) {
 			compiler := NewCompiler().WithStrict(true)
 			compiler.Modules = map[string]*Module{
-				"test": MustParseModule(tc.module),
+				"test": module(tc.module),
 			}
 			compileStages(compiler, nil)
 
@@ -5609,7 +6592,7 @@ func TestCompileUnusedAssignedVarsErrorLocations(t *testing.T) {
 		{
 			note: "one of the two function args is not used - issue 5662 regression test",
 			module: `package test
-			func(x, y) {
+			func(x, y) if {
 				x = 1
 			}`,
 			expectedErrors: Errors{
@@ -5623,7 +6606,7 @@ func TestCompileUnusedAssignedVarsErrorLocations(t *testing.T) {
 		{
 			note: "multiple unused assigned var in scope - issue 5662 regression test",
 			module: `package test
-			allow {
+			allow if {
 				input.message == "world"
 				input.test == "foo"
 				input.x == "foo"
@@ -5662,7 +6645,7 @@ func TestCompileUnusedAssignedVarsErrorLocations(t *testing.T) {
 		t.Run(tc.note, func(t *testing.T) {
 			compiler := NewCompiler().WithStrict(true)
 			compiler.Modules = map[string]*Module{
-				"test": MustParseModule(tc.module),
+				"test": module(tc.module),
 			}
 			compileStages(compiler, nil)
 			assertErrors(t, compiler.Errors, tc.expectedErrors, true)
@@ -5677,7 +6660,7 @@ func TestCompileUnusedDeclaredVarsErrorLocations(t *testing.T) {
 			note: "simple unused some var - issue 4238 regression test",
 			module: `package test
 
-			foo {
+			foo if {
 				print("Hello world")
 				some i
 			}`,
@@ -5693,12 +6676,12 @@ func TestCompileUnusedDeclaredVarsErrorLocations(t *testing.T) {
 			note: "simple unused some vars, 2x rules",
 			module: `package test
 
-			foo {
+			foo if {
 				print("Hello world")
 				some i
 			}
-			
-			bar {
+
+			bar if {
 				print("Hello world")
 				some j
 			}`,
@@ -5720,7 +6703,7 @@ func TestCompileUnusedDeclaredVarsErrorLocations(t *testing.T) {
 			module: `package test
 
 			x := [1, 1, 1]
-			foo2 {
+			foo2 if {
 				print("A")
 				some a, b, c
 				some i, j
@@ -5765,7 +6748,7 @@ func TestCompileUnusedDeclaredVarsErrorLocations(t *testing.T) {
 		t.Run(tc.note, func(t *testing.T) {
 			compiler := NewCompiler().WithStrict(true)
 			compiler.Modules = map[string]*Module{
-				"test": MustParseModule(tc.module),
+				"test": module(tc.module),
 			}
 			compileStages(compiler, nil)
 
@@ -5775,33 +6758,49 @@ func TestCompileUnusedDeclaredVarsErrorLocations(t *testing.T) {
 }
 
 func TestCompileInvalidEqAssignExpr(t *testing.T) {
-
-	c := NewCompiler()
-
-	c.Modules["error"] = MustParseModule(`package errors
-
-
-	p {
-		# Arity mismatches are caught in the checkUndefinedFuncs check,
-		# and invalid eq/assign calls are passed along until then.
-		assign()
-		assign(1)
-		eq()
-		eq(1)
-	}`)
-
-	var prev func()
-	checkUndefinedFuncs := reflect.ValueOf(c.checkUndefinedFuncs)
-
-	for _, stage := range c.stages {
-		if reflect.ValueOf(stage.f).Pointer() == checkUndefinedFuncs.Pointer() {
-			break
-		}
-		prev = stage.f
+	tests := []struct {
+		note        string
+		regoVersion RegoVersion
+	}{
+		{
+			note:        "v0",
+			regoVersion: RegoV0,
+		},
+		{
+			note:        "v1",
+			regoVersion: RegoV1,
+		},
 	}
 
-	compileStages(c, prev)
-	assertNotFailed(t, c)
+	for _, tc := range tests {
+		t.Run(tc.note, func(t *testing.T) {
+			c := NewCompiler()
+
+			c.Modules["error"] = MustParseModuleWithOpts(`package errors
+
+				p if {
+					# Arity mismatches are caught in the checkUndefinedFuncs check,
+					# and invalid eq/assign calls are passed along until then.
+					assign()
+					assign(1)
+					eq()
+					eq(1)
+				}`, ParserOptions{RegoVersion: tc.regoVersion, AllFutureKeywords: true})
+
+			var prev func()
+			checkUndefinedFuncs := reflect.ValueOf(c.checkUndefinedFuncs)
+
+			for _, stage := range c.stages {
+				if reflect.ValueOf(stage.f).Pointer() == checkUndefinedFuncs.Pointer() {
+					break
+				}
+				prev = stage.f
+			}
+
+			compileStages(c, prev)
+			assertNotFailed(t, c)
+		})
+	}
 }
 
 func TestCompilerRewriteComprehensionTerm(t *testing.T) {
@@ -5839,17 +6838,17 @@ func TestCompilerRewriteDoubleEq(t *testing.T) {
 	}{
 		{
 			note:  "vars and constants",
-			input: "p { x = 1; x == 1; y = [1,2,3]; y == [1,2,3] }",
+			input: "p if { x = 1; x == 1; y = [1,2,3]; y == [1,2,3] }",
 			exp:   `x = 1; x = 1; y = [1,2,3]; y = [1,2,3]`,
 		},
 		{
 			note:  "refs",
-			input: "p { input.x == data.y }",
+			input: "p if { input.x == data.y }",
 			exp:   `input.x = data.y`,
 		},
 		{
 			note:  "comprehensions",
-			input: "p { [1|true] == [2|true] }",
+			input: "p if { [1|true] == [2|true] }",
 			exp:   `[1|true] = [2|true]`,
 		},
 		// TODO(tsandall): improve support for calls so that extra unification step is
@@ -5860,29 +6859,29 @@ func TestCompilerRewriteDoubleEq(t *testing.T) {
 		// have been converted into = and then the safety check would need to be updated.
 		{
 			note:  "calls",
-			input: "p { count([1,2]) == 2 }",
+			input: "p if { count([1,2]) == 2 }",
 			exp:   `count([1,2], __local0__); __local0__ = 2`,
 		},
 		{
 			note:  "embedded",
-			input: "p { x = 1; y = [x == 0] }",
+			input: "p if { x = 1; y = [x == 0] }",
 			exp:   `x = 1; equal(x, 0, __local0__); y = [__local0__]`,
 		},
 		{
 			note:  "embedded in call",
-			input: `p { x = 0; neq(true, x == 1) }`,
+			input: `p if { x = 0; neq(true, x == 1) }`,
 			exp:   `x = 0; equal(x, 1, __local0__); neq(true, __local0__)`,
 		},
 		{
 			note:  "comprehension in object key",
-			input: `p { {{1 | 0 == 0}: 2} }`,
+			input: `p if { {{1 | 0 == 0}: 2} }`,
 			exp:   `{{1 | 0 = 0}: 2}`,
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.note, func(t *testing.T) {
 			c := NewCompiler()
-			c.Modules["test"] = MustParseModule("package test\n" + tc.input)
+			c.Modules["test"] = module("package test\n" + tc.input)
 			compileStages(c, c.rewriteEquals)
 			assertNotFailed(t, c)
 			exp := MustParseBody(tc.exp)
@@ -5905,32 +6904,34 @@ func TestCompilerRewriteDynamicTerms(t *testing.T) {
 		input    string
 		expected string
 	}{
-		{`arr { [str] }`, `__local0__ = data.test.str; [__local0__]`},
-		{`arr2 { [[str]] }`, `__local0__ = data.test.str; [[__local0__]]`},
-		{`obj { {"x": str} }`, `__local0__ = data.test.str; {"x": __local0__}`},
-		{`obj2 { {"x": {"y": str}} }`, `__local0__ = data.test.str; {"x": {"y": __local0__}}`},
-		{`set { {str} }`, `__local0__ = data.test.str; {__local0__}`},
-		{`set2 { {{str}} }`, `__local0__ = data.test.str; {{__local0__}}`},
-		{`ref { str[str] }`, `__local0__ = data.test.str; data.test.str[__local0__]`},
-		{`ref2 { str[str[str]] }`, `__local0__ = data.test.str; __local1__ = data.test.str[__local0__]; data.test.str[__local1__]`},
-		{`arr_compr { [1 | [str]] }`, `[1 | __local0__ = data.test.str; [__local0__]]`},
-		{`arr_compr2 { [1 | [1 | [str]]] }`, `[1 | [1 | __local0__ = data.test.str; [__local0__]]]`},
-		{`set_compr { {1 | [str]} }`, `{1 | __local0__ = data.test.str; [__local0__]}`},
-		{`set_compr2 { {1 | {1 | [str]}} }`, `{1 | {1 | __local0__ = data.test.str; [__local0__]}}`},
-		{`obj_compr { {"a": "b" | [str]} }`, `{"a": "b" | __local0__ = data.test.str; [__local0__]}`},
-		{`obj_compr2 { {"a": "b" | {"a": "b" | [str]}} }`, `{"a": "b" | {"a": "b" | __local0__ = data.test.str; [__local0__]}}`},
-		{`equality { str = str }`, `data.test.str = data.test.str`},
-		{`equality2 { [str] = [str] }`, `__local0__ = data.test.str; __local1__ = data.test.str; [__local0__] = [__local1__]`},
-		{`call { startswith(str, "") }`, `__local0__ = data.test.str; startswith(__local0__, "")`},
-		{`call2 { count([str], n) }`, `__local0__ = data.test.str; count([__local0__], n)`},
-		{`eq_with { [str] = [1] with input as 1 }`, `__local0__ = data.test.str with input as 1; [__local0__] = [1] with input as 1`},
-		{`term_with { [[str]] with input as 1 }`, `__local0__ = data.test.str with input as 1; [[__local0__]] with input as 1`},
-		{`call_with { count(str) with input as 1 }`, `__local0__ = data.test.str with input as 1; count(__local0__) with input as 1`},
-		{`call_func { f(input, "foo") } f(x,y) { x[y] }`, `__local2__ = input; data.test.f(__local2__, "foo")`},
-		{`call_func2 { f(input.foo, "foo") } f(x,y) { x[y] }`, `__local2__ = input.foo; data.test.f(__local2__, "foo")`},
-		{`every_domain { every _ in str { true } }`, `__local1__ = data.test.str; every __local0__, _ in __local1__ { true }`},
-		{`every_domain_call { every _ in numbers.range(1, 10) { true } }`, `numbers.range(1, 10, __local1__); every __local0__, _ in __local1__ { true }`},
-		{`every_body { every _ in [] { [str] } }`,
+		{`arr if { [str] }`, `__local0__ = data.test.str; [__local0__]`},
+		{`arr2 if { [[str]] }`, `__local0__ = data.test.str; [[__local0__]]`},
+		{`obj if { {"x": str} }`, `__local0__ = data.test.str; {"x": __local0__}`},
+		{`obj2 if { {"x": {"y": str}} }`, `__local0__ = data.test.str; {"x": {"y": __local0__}}`},
+		{`set if { {str} }`, `__local0__ = data.test.str; {__local0__}`},
+		{`set2 if { {{str}} }`, `__local0__ = data.test.str; {{__local0__}}`},
+		{`ref if { str[str] }`, `__local0__ = data.test.str; data.test.str[__local0__]`},
+		{`ref2 if { str[str[str]] }`, `__local0__ = data.test.str; __local1__ = data.test.str[__local0__]; data.test.str[__local1__]`},
+		{`arr_compr if { [1 | [str]] }`, `[1 | __local0__ = data.test.str; [__local0__]]`},
+		{`arr_compr2 if { [1 | [1 | [str]]] }`, `[1 | [1 | __local0__ = data.test.str; [__local0__]]]`},
+		{`set_compr if { {1 | [str]} }`, `{1 | __local0__ = data.test.str; [__local0__]}`},
+		{`set_compr2 if { {1 | {1 | [str]}} }`, `{1 | {1 | __local0__ = data.test.str; [__local0__]}}`},
+		{`obj_compr if { {"a": "b" | [str]} }`, `{"a": "b" | __local0__ = data.test.str; [__local0__]}`},
+		{`obj_compr2 if { {"a": "b" | {"a": "b" | [str]}} }`, `{"a": "b" | {"a": "b" | __local0__ = data.test.str; [__local0__]}}`},
+		{`equality if { str = str }`, `data.test.str = data.test.str`},
+		{`equality2 if { [str] = [str] }`, `__local0__ = data.test.str; __local1__ = data.test.str; [__local0__] = [__local1__]`},
+		{`call if { startswith(str, "") }`, `__local0__ = data.test.str; startswith(__local0__, "")`},
+		{`call2 if { count([str], n) }`, `__local0__ = data.test.str; count([__local0__], n)`},
+		{`eq_with if { [str] = [1] with input as 1 }`, `__local0__ = data.test.str with input as 1; [__local0__] = [1] with input as 1`},
+		{`term_with if { [[str]] with input as 1 }`, `__local0__ = data.test.str with input as 1; [[__local0__]] with input as 1`},
+		{`call_with if { count(str) with input as 1 }`, `__local0__ = data.test.str with input as 1; count(__local0__) with input as 1`},
+		{`call_func if { f(input, "foo") } f(x,y) if { x[y] }`, `__local2__ = input; data.test.f(__local2__, "foo")`},
+		{`call_func2 if { f(input.foo, "foo") } f(x,y) if { x[y] }`, `__local2__ = input.foo; data.test.f(__local2__, "foo")`},
+		{`every_domain if { every _ in str { true } }`, `__local1__ = data.test.str; every __local0__, _ in __local1__ { true }`},
+		{`every_domain_array if { every _ in [1, 2, 3] { true } }`, `__local1__ = [1, 2, 3]; every __local0__, _ in __local1__ { true }`},
+		{`every_domain_call if { every _ in numbers.range(1, 10) { true } }`, `numbers.range(1, 10, __local2__); __local1__ = __local2__; every __local0__, _ in __local1__ { true }`},
+		{`every_domain_array_w_calls if { every _ in [1 / 2, "foo", abs(-1)] { true } }`, `div(1, 2, __local2__); abs(-1, __local3__); __local1__ = [__local2__, "foo", __local3__]; every __local0__, _ in __local1__ { true }`},
+		{`every_body if { every _ in [] { [str] } }`,
 			`__local1__ = []; every __local0__, _ in __local1__ { __local2__ = data.test.str; [__local2__] }`},
 	}
 
@@ -5938,8 +6939,7 @@ func TestCompilerRewriteDynamicTerms(t *testing.T) {
 		t.Run(tc.input, func(t *testing.T) {
 			c := NewCompiler()
 			opts := ParserOptions{AllFutureKeywords: true, unreleasedKeywords: true}
-			module := fixture + tc.input
-			c.Modules["test"] = MustParseModuleWithOpts(module, opts)
+			c.Modules["test"] = module(fixture + tc.input)
 			compileStages(c, c.rewriteDynamicTerms)
 			assertNotFailed(t, c)
 			expected := MustParseBodyWithOpts(tc.expected, opts)
@@ -5968,119 +6968,119 @@ func TestCompilerRewriteWithValue(t *testing.T) {
 	}{
 		{
 			note:     "nop",
-			input:    `p { true with input as 1 }`,
-			expected: `p { true with input as 1 }`,
+			input:    `p if { true with input as 1 }`,
+			expected: `p if { true with input as 1 }`,
 		},
 		{
 			note:     "refs",
-			input:    `p { true with input as arr }`,
-			expected: `p { __local0__ = data.test.arr; true with input as __local0__ }`,
+			input:    `p if { true with input as arr }`,
+			expected: `p if { __local0__ = data.test.arr; true with input as __local0__ }`,
 		},
 		{
 			note:     "array comprehension",
-			input:    `p { true with input as [true | true] }`,
-			expected: `p { __local0__ = [true | true]; true with input as __local0__ }`,
+			input:    `p if { true with input as [true | true] }`,
+			expected: `p if { __local0__ = [true | true]; true with input as __local0__ }`,
 		},
 		{
 			note:     "set comprehension",
-			input:    `p { true with input as {true | true} }`,
-			expected: `p { __local0__ = {true | true}; true with input as __local0__ }`,
+			input:    `p if { true with input as {true | true} }`,
+			expected: `p if { __local0__ = {true | true}; true with input as __local0__ }`,
 		},
 		{
 			note:     "object comprehension",
-			input:    `p { true with input as {"k": true | true} }`,
-			expected: `p { __local0__ = {"k": true | true}; true with input as __local0__ }`,
+			input:    `p if { true with input as {"k": true | true} }`,
+			expected: `p if { __local0__ = {"k": true | true}; true with input as __local0__ }`,
 		},
 		{
 			note:     "comprehension nested",
-			input:    `p { true with input as [true | true with input as arr] }`,
-			expected: `p { __local0__ = [true | __local1__ = data.test.arr; true with input as __local1__]; true with input as __local0__ }`,
+			input:    `p if { true with input as [true | true with input as arr] }`,
+			expected: `p if { __local0__ = [true | __local1__ = data.test.arr; true with input as __local1__]; true with input as __local0__ }`,
 		},
 		{
 			note:     "multiple",
-			input:    `p { true with input.a as arr[0] with input.b as arr[1] }`,
-			expected: `p { __local0__ = data.test.arr[0]; __local1__ = data.test.arr[1]; true with input.a as __local0__ with input.b as __local1__ }`,
+			input:    `p if { true with input.a as arr[0] with input.b as arr[1] }`,
+			expected: `p if { __local0__ = data.test.arr[0]; __local1__ = data.test.arr[1]; true with input.a as __local0__ with input.b as __local1__ }`,
 		},
 		{
 			note:    "invalid target",
-			input:   `p { true with foo.q as 1 }`,
+			input:   `p if { true with foo.q as 1 }`,
 			wantErr: fmt.Errorf("rego_type_error: with keyword target must reference existing input, data, or a function"),
 		},
 		{
 			note:     "built-in function: replaced by (unknown) var",
-			input:    `p { true with time.now_ns as foo }`,
-			expected: `p { true with time.now_ns as foo }`, // `foo` still a Var here
+			input:    `p if { true with time.now_ns as foo }`,
+			expected: `p if { true with time.now_ns as foo }`, // `foo` still a Var here
 		},
 		{
 			note: "built-in function: valid, arity 0",
 			input: `
-				p { true with time.now_ns as now }
+				p if { true with time.now_ns as now }
 				now() = 1
 			`,
-			expected: `p { true with time.now_ns as data.test.now }`,
+			expected: `p if { true with time.now_ns as data.test.now }`,
 		},
 		{
 			note: "built-in function: valid func ref, arity 1",
 			input: `
-				p { true with http.send as mock_http_send }
+				p if { true with http.send as mock_http_send }
 				mock_http_send(_) = { "body": "yay" }
 			`,
-			expected: `p { true with http.send as data.test.mock_http_send }`,
+			expected: `p if { true with http.send as data.test.mock_http_send }`,
 		},
 		{
 			note: "built-in function: replaced by value",
 			input: `
-				p { true with http.send as { "body": "yay" } }
+				p if { true with http.send as { "body": "yay" } }
 			`,
-			expected: `p { true with http.send as {"body": "yay"} }`,
+			expected: `p if { true with http.send as {"body": "yay"} }`,
 		},
 		{
 			note: "built-in function: replaced by var",
 			input: `
-				p {
+				p if {
 					resp := { "body": "yay" }
 					true with http.send as resp
 				}
 			`,
-			expected: `p { __local0__ = {"body": "yay"}; true with http.send as __local0__ }`,
+			expected: `p if { __local0__ = {"body": "yay"}; true with http.send as __local0__ }`,
 		},
 		{
 			note: "non-built-in function: replaced by var",
 			input: `
-				p {
+				p if {
 					resp := true
 					f(true) with f as resp
 				}
-				f(false) { true }
+				f(false) if { true }
 			`,
-			expected: `p { __local0__ = true; data.test.f(true) with data.test.f as __local0__ }`,
+			expected: `p if { __local0__ = true; data.test.f(true) with data.test.f as __local0__ }`,
 		},
 		{
 			note: "built-in function: replaced by comprehension",
 			input: `
-				p { true with http.send as { x: true | x := ["a", "b"][_] } }
+				p if { true with http.send as { x: true | x := ["a", "b"][_] } }
 			`,
-			expected: `p { __local2__ = {__local0__: true | __local1__ = ["a", "b"]; __local0__ = __local1__[_]}; true with http.send as __local2__ }`,
+			expected: `p if { __local2__ = {__local0__: true | __local1__ = ["a", "b"]; __local0__ = __local1__[_]}; true with http.send as __local2__ }`,
 		},
 		{
 			note: "built-in function: replaced by ref",
 			input: `
-				p { true with http.send as resp }
+				p if { true with http.send as resp }
 				resp := { "body": "yay" }
 			`,
-			expected: `p { true with http.send as data.test.resp }`,
+			expected: `p if { true with http.send as data.test.resp }`,
 		},
 		{
 			note: "built-in function: replaced by another built-in (ref)",
 			input: `
-				p { true with http.send as object.union_n }
+				p if { true with http.send as object.union_n }
 			`,
-			expected: `p { true with http.send as object.union_n }`,
+			expected: `p if { true with http.send as object.union_n }`,
 		},
 		{
 			note: "built-in function: replaced by another built-in (simple)",
 			input: `
-				p { true with http.send as count }
+				p if { true with http.send as count }
 			`,
 			expectedRule: func() *Rule {
 				r := MustParseRule(`p { true with http.send as count }`)
@@ -6092,7 +7092,7 @@ func TestCompilerRewriteWithValue(t *testing.T) {
 			note: "built-in function: replaced by another built-in that's marked unsafe",
 			input: `
 				q := is_object({"url": "https://httpbin.org", "method": "GET"})
-				p { q with is_object as http.send }
+				p if { q with is_object as http.send }
 			`,
 			opts:    func(c *Compiler) *Compiler { return c.WithUnsafeBuiltins(map[string]struct{}{"http.send": {}}) },
 			wantErr: fmt.Errorf("rego_compile_error: with keyword replacing built-in function: target must not be unsafe: \"http.send\""),
@@ -6102,7 +7102,7 @@ func TestCompilerRewriteWithValue(t *testing.T) {
 			input: `
 			r(_) = {}
 			q := r({"url": "https://httpbin.org", "method": "GET"})
-			p {
+			p if {
 				q with r as http.send
 			}`,
 			opts:    func(c *Compiler) *Compiler { return c.WithUnsafeBuiltins(map[string]struct{}{"http.send": {}}) },
@@ -6111,11 +7111,12 @@ func TestCompilerRewriteWithValue(t *testing.T) {
 		{
 			note: "built-in function: valid, arity 1, non-compound name",
 			input: `
-				p { concat("/", input) with concat as mock_concat }
+				p if { concat("/", input) with concat as mock_concat }
 				mock_concat(_, _) = "foo/bar"
 			`,
 			expectedRule: func() *Rule {
-				r := MustParseRule(`p { concat("/", input) with concat as data.test.mock_concat }`)
+				r := MustParseRuleWithOpts(`p if { concat("/", input) with concat as data.test.mock_concat }`,
+					ParserOptions{RegoVersion: RegoV1})
 				r.Body[0].With[0].Target.Value = Ref([]*Term{VarTerm("concat")})
 				return r
 			}(),
@@ -6128,14 +7129,13 @@ func TestCompilerRewriteWithValue(t *testing.T) {
 			if tc.opts != nil {
 				c = tc.opts(c)
 			}
-			module := fixture + tc.input
-			c.Modules["test"] = MustParseModule(module)
+			c.Modules["test"] = module(fixture + tc.input)
 			compileStages(c, c.rewriteWithModifiers)
 			if tc.wantErr == nil {
 				assertNotFailed(t, c)
 				expected := tc.expectedRule
 				if expected == nil {
-					expected = MustParseRule(tc.expected)
+					expected = MustParseRuleWithOpts(tc.expected, ParserOptions{RegoVersion: RegoV1})
 				}
 				result := c.Modules["test"].Rules[1]
 				if result.Compare(expected) != 0 {
@@ -6158,69 +7158,69 @@ func TestCompilerRewritePrintCallsErasure(t *testing.T) {
 		{
 			note: "no-op",
 			module: `package test
-			p { true }`,
+			p if { true }`,
 			exp: `package test
-			p { true }`,
+			p if { true }`,
 		},
 		{
 			note: "replace empty body with true",
 			module: `package test
 
-			p { print(1) }
+			p if { print(1) }
 			`,
 			exp: `package test
 
-			p { true } `,
+			p if { true } `,
 		},
 		{
 			note: "rule body",
 			module: `package test
 
-			p { false; print(1) }
+			p if { false; print(1) }
 			`,
 			exp: `package test
 
-			p { false } `,
+			p if { false } `,
 		},
 		{
 			note: "set comprehension body",
 			module: `package test
 
-			p { {1 | false; print(1)} }
+			p if { {1 | false; print(1)} }
 			`,
 			exp: `package test
 
-			p { {1 | false} } `,
+			p if { {1 | false} } `,
 		},
 		{
 			note: "array comprehension body",
 			module: `package test
 
-			p { [1 | false; print(1)] }
+			p if { [1 | false; print(1)] }
 			`,
 			exp: `package test
 
-			p { [1 | false] } `,
+			p if { [1 | false] } `,
 		},
 		{
 			note: "object comprehension body",
 			module: `package test
 
-			p { {"x": 1 | false; print(1)} }
+			p if { {"x": 1 | false; print(1)} }
 			`,
 			exp: `package test
 
-			p { {"x": 1 | false} } `,
+			p if { {"x": 1 | false} } `,
 		},
 		{
 			note: "every body",
 			module: `package test
 
-			p { every _ in [] { false; print(1) } }
+			p if { every _ in [] { false; print(1) } }
 			`,
 			exp: `package test
 
-			p = true { __local1__ = []; every __local0__, _ in __local1__ { false } }`,
+			p = true if { __local1__ = []; every __local0__, _ in __local1__ { false } }`,
 		},
 		{
 			note: "in head",
@@ -6229,21 +7229,20 @@ func TestCompilerRewritePrintCallsErasure(t *testing.T) {
 			p = {1 | print("x")}`,
 			exp: `package test
 
-			p = __local0__ { true; __local0__ = {1 | true} }`,
+			p = __local0__ if { true; __local0__ = {1 | true} }`,
 		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.note, func(t *testing.T) {
 			c := NewCompiler().WithEnablePrintStatements(false)
-			opts := ParserOptions{AllFutureKeywords: true, unreleasedKeywords: true}
 			c.Compile(map[string]*Module{
-				"test.rego": MustParseModuleWithOpts(tc.module, opts),
+				"test.rego": module(tc.module),
 			})
 			if c.Failed() {
 				t.Fatal(c.Errors)
 			}
-			exp := MustParseModuleWithOpts(tc.exp, opts)
+			exp := module(tc.exp)
 			if !exp.Equal(c.Modules["test.rego"]) {
 				t.Fatalf("Expected:\n\n%v\n\nGot:\n\n%v", exp, c.Modules["test.rego"])
 			}
@@ -6261,20 +7260,20 @@ func TestCompilerRewritePrintCallsErrors(t *testing.T) {
 			note: "non-existent var",
 			module: `package test
 
-			p { print(x) }`,
+			p if { print(x) }`,
 			exp: errors.New("var x is undeclared"),
 		},
 		{
 			note: "declared after print",
 			module: `package test
 
-			p { print(x); x = 7 }`,
+			p if { print(x); x = 7 }`,
 			exp: errors.New("var x is undeclared"),
 		},
 		{
 			note: "inside comprehension",
 			module: `package test
-			p { {1 | print(x)} }
+			p if { {1 | print(x)} = {1 | print(7)} }
 			`,
 			exp: errors.New("var x is undeclared"),
 		},
@@ -6284,7 +7283,7 @@ func TestCompilerRewritePrintCallsErrors(t *testing.T) {
 		t.Run(tc.note, func(t *testing.T) {
 			c := NewCompiler().WithEnablePrintStatements(true)
 			c.Compile(map[string]*Module{
-				"test.rego": MustParseModule(tc.module),
+				"test.rego": module(tc.module),
 			})
 			if !c.Failed() {
 				t.Fatal("expected error")
@@ -6306,55 +7305,55 @@ func TestCompilerRewritePrintCalls(t *testing.T) {
 			note: "print one",
 			module: `package test
 
-			p { print(1) }`,
+			p if { print(1) }`,
 			exp: `package test
 
-			p = true { __local1__ = {__local0__ | __local0__ = 1}; internal.print([__local1__]) }`,
+			p = true if { __local1__ = {__local0__ | __local0__ = 1}; internal.print([__local1__]) }`,
 		},
 		{
 			note: "print multiple",
 			module: `package test
 
-			p { print(1, 2) }`,
+			p if { print(1, 2) }`,
 			exp: `package test
 
-			p = true { __local2__ = {__local0__ | __local0__ = 1}; __local3__ = {__local1__ | __local1__ = 2}; internal.print([__local2__, __local3__]) }`,
+			p = true if { __local2__ = {__local0__ | __local0__ = 1}; __local3__ = {__local1__ | __local1__ = 2}; internal.print([__local2__, __local3__]) }`,
 		},
 		{
 			note: "print inside set comprehension",
 			module: `package test
 
-			p { x = 1; {2 | print(x)} }`,
+			p if { x = 1; {2 | print(x)} }`,
 			exp: `package test
 
-			p = true { x = 1; {2 | __local1__ = {__local0__ | __local0__ = x}; internal.print([__local1__])} }`,
+			p = true if { x = 1; {2 | __local1__ = {__local0__ | __local0__ = x}; internal.print([__local1__])} }`,
 		},
 		{
 			note: "print inside array comprehension",
 			module: `package test
 
-			p { x = 1; [2 | print(x)] }`,
+			p if { x = 1; [2 | print(x)] }`,
 			exp: `package test
 
-			p = true { x = 1; [2 | __local1__ = {__local0__ | __local0__ = x}; internal.print([__local1__])] }`,
+			p = true if { x = 1; [2 | __local1__ = {__local0__ | __local0__ = x}; internal.print([__local1__])] }`,
 		},
 		{
 			note: "print inside object comprehension",
 			module: `package test
 
-			p { x = 1; {"x": 2 | print(x)} }`,
+			p if { x = 1; {"x": 2 | print(x)} }`,
 			exp: `package test
 
-			p = true { x = 1; {"x": 2 | __local1__ = {__local0__ | __local0__ = x}; internal.print([__local1__])} }`,
+			p = true if { x = 1; {"x": 2 | __local1__ = {__local0__ | __local0__ = x}; internal.print([__local1__])} }`,
 		},
 		{
 			note: "print inside every",
 			module: `package test
 
-			p { every x in [1,2] { print(x) } }`,
+			p if { every x in [1,2] { print(x) } }`,
 			exp: `package test
 
-			p = true {
+			p = true if {
 				__local3__ = [1, 2]
 				every __local0__, __local1__ in __local3__ {
 					__local4__ = {__local2__ | __local2__ = __local1__}
@@ -6366,13 +7365,13 @@ func TestCompilerRewritePrintCalls(t *testing.T) {
 			note: "print output of nested call",
 			module: `package test
 
-			p {
+			p if {
 				x := split("abc", "")[y]
 				print(x, y)
 			}`,
 			exp: `package test
 
-			p = true { split("abc", "", __local3__); __local0__ = __local3__[y]; __local4__ = {__local1__ | __local1__ = __local0__}; __local5__ = {__local2__ | __local2__ = y}; internal.print([__local4__, __local5__]) }`,
+			p = true if { split("abc", "", __local3__); __local0__ = __local3__[y]; __local4__ = {__local1__ | __local1__ = __local0__}; __local5__ = {__local2__ | __local2__ = y}; internal.print([__local4__, __local5__]) }`,
 		},
 		{
 			note: "print call in head",
@@ -6381,7 +7380,7 @@ func TestCompilerRewritePrintCalls(t *testing.T) {
 			p = {1 | print("x") }`,
 			exp: `package test
 
-			p = __local1__ {
+			p = __local1__ if {
 				true
 				__local1__ = {1 | __local2__ = { __local0__ | __local0__ = "x"}; internal.print([__local2__])}
 			}`,
@@ -6393,50 +7392,50 @@ func TestCompilerRewritePrintCalls(t *testing.T) {
 			f(a) = {1 | a[x]; print(x)}`,
 			exp: `package test
 
-			f(__local0__) = __local2__ { true; __local2__ = {1 | __local0__[x]; __local3__ = {__local1__ | __local1__ = x}; internal.print([__local3__])} }
+			f(__local0__) = __local2__ if { true; __local2__ = {1 | __local0__[x]; __local3__ = {__local1__ | __local1__ = x}; internal.print([__local3__])} }
 			`,
 		},
 		{
 			note: "print call of var in head key",
 			module: `package test
 			f(_) = [1, 2, 3]
-			p[x] { [_, x, _] := f(true); print(x) }`,
+			p contains x if { [_, x, _] := f(true); print(x) }`,
 			exp: `package test
-			f(__local0__) = [1, 2, 3] { true }
-			p[__local2__] { data.test.f(true, __local5__); [__local1__, __local2__, __local3__] = __local5__; __local6__ = {__local4__ | __local4__ = __local2__}; internal.print([__local6__]) }
+			f(__local0__) = [1, 2, 3] if { true }
+			p contains __local2__ if { data.test.f(true, __local5__); [__local1__, __local2__, __local3__] = __local5__; __local6__ = {__local4__ | __local4__ = __local2__}; internal.print([__local6__]) }
 			`,
 		},
 		{
 			note: "print call of var in head value",
 			module: `package test
 			f(_) = [1, 2, 3]
-			p = x { [_, x, _] := f(true); print(x) }`,
+			p = x if { [_, x, _] := f(true); print(x) }`,
 			exp: `package test
-			f(__local0__) = [1, 2, 3] { true }
-			p = __local2__ { data.test.f(true, __local5__); [__local1__, __local2__, __local3__] = __local5__; __local6__ = {__local4__ | __local4__ = __local2__}; internal.print([__local6__]) }
+			f(__local0__) = [1, 2, 3] if { true }
+			p = __local2__ if { data.test.f(true, __local5__); [__local1__, __local2__, __local3__] = __local5__; __local6__ = {__local4__ | __local4__ = __local2__}; internal.print([__local6__]) }
 			`,
 		},
 		{
 			note: "print call of vars in head key and value",
 			module: `package test
 			f(_) = [1, 2, 3]
-			p[x] = y { [_, x, y] := f(true); print(x) }`,
+			p[x] = y if { [_, x, y] := f(true); print(x) }`,
 			exp: `package test
-			f(__local0__) = [1, 2, 3] { true }
-			p[__local2__] = __local3__ { data.test.f(true, __local5__); [__local1__, __local2__, __local3__] = __local5__; __local6__ = {__local4__ | __local4__ = __local2__}; internal.print([__local6__]) }
+			f(__local0__) = [1, 2, 3] if { true }
+			p[__local2__] = __local3__ if { data.test.f(true, __local5__); [__local1__, __local2__, __local3__] = __local5__; __local6__ = {__local4__ | __local4__ = __local2__}; internal.print([__local6__]) }
 			`,
 		},
 		{
 			note: "print call of vars altered with 'with' and call",
 			module: `package test
 			q = input
-			p {
+			p if {
 				x := q with input as json.unmarshal("{}")
 				print(x)
 			}`,
 			exp: `package test
-			q = __local3__ { true; __local3__ = input }
-			p = true {
+			q = __local3__ if { true; __local3__ = input }
+			p = true if {
 				json.unmarshal("{}", __local2__)
 				__local0__ = data.test.q with input as __local2__
 				__local4__ = {__local1__ | __local1__ = __local0__}
@@ -6448,14 +7447,13 @@ func TestCompilerRewritePrintCalls(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.note, func(t *testing.T) {
 			c := NewCompiler().WithEnablePrintStatements(true)
-			opts := ParserOptions{AllFutureKeywords: true, unreleasedKeywords: true}
 			c.Compile(map[string]*Module{
-				"test.rego": MustParseModuleWithOpts(tc.module, opts),
+				"test.rego": module(tc.module),
 			})
 			if c.Failed() {
 				t.Fatal(c.Errors)
 			}
-			exp := MustParseModuleWithOpts(tc.exp, opts)
+			exp := module(tc.exp)
 			if !exp.Equal(c.Modules["test.rego"]) {
 				t.Fatalf("Expected:\n\n%v\n\nGot:\n\n%v", exp, c.Modules["test.rego"])
 			}
@@ -6465,31 +7463,30 @@ func TestCompilerRewritePrintCalls(t *testing.T) {
 
 func TestRewritePrintCallsWithElseImplicitArgs(t *testing.T) {
 
-	module := `package test
+	mod := `package test
 
-	f(x, y) {
+	f(x, y) if {
 		x = y
 	}
 
-	else = false {
+	else = false if {
 		print(x, y)
 	}`
 
 	c := NewCompiler().WithEnablePrintStatements(true)
-	opts := ParserOptions{AllFutureKeywords: true, unreleasedKeywords: true}
 	c.Compile(map[string]*Module{
-		"test.rego": MustParseModuleWithOpts(module, opts),
+		"test.rego": module(mod),
 	})
 
 	if c.Failed() {
 		t.Fatal(c.Errors)
 	}
 
-	exp := MustParseModuleWithOpts(`package test
+	exp := module(`package test
 
-	f(__local0__, __local1__) = true { __local0__ = __local1__ }
-	else = false { __local4__ = {__local2__ | __local2__ = __local0__}; __local5__ = {__local3__ | __local3__ = __local1__}; internal.print([__local4__, __local5__]) }
-	`, opts)
+	f(__local0__, __local1__) = true if { __local0__ = __local1__ }
+	else = false if { __local4__ = {__local2__ | __local2__ = __local0__}; __local5__ = {__local3__ | __local3__ = __local1__}; internal.print([__local4__, __local5__]) }
+	`)
 
 	// NOTE(tsandall): we have to patch the implicit args on the else rule
 	// because of how the parser copies the arg names across from the first
@@ -6512,20 +7509,20 @@ func TestCompilerMockFunction(t *testing.T) {
 			note: "simple valid",
 			module: `package test
 				now() = 123
-				p { true with time.now_ns as now }
+				p if { true with time.now_ns as now }
 			`,
 		},
 		{
 			note: "simple valid, simple name",
 			module: `package test
 				mock_concat(_, _) = "foo/bar"
-				p { concat("/", input) with concat as mock_concat }
+				p if { concat("/", input) with concat as mock_concat }
 			`,
 		},
 		{
 			note: "invalid ref: nonexistant",
 			module: `package test
-				p { true with time.now_ns as now }
+				p if { true with time.now_ns as now }
 			`,
 			err: "rego_unsafe_var_error: var now is unsafe", // we're running all compiler stages here
 		},
@@ -6533,21 +7530,21 @@ func TestCompilerMockFunction(t *testing.T) {
 			note: "valid ref: not a function, but arity = 0",
 			module: `package test
 				now = 1
-				p { true with time.now_ns as now }
+				p if { true with time.now_ns as now }
 			`,
 		},
 		{
 			note: "ref: not a function, arity > 0",
 			module: `package test
 				http_send = { "body": "nope" }
-				p { true with http.send as http_send }
+				p if { true with http.send as http_send }
 			`,
 		},
 		{
 			note: "invalid ref: arity mismatch",
 			module: `package test
 				http_send(_, _) = { "body": "nope" }
-				p { true with http.send as http_send }
+				p if { true with http.send as http_send }
 			`,
 			err: "rego_type_error: http.send: arity mismatch\n\thave: (any, any)\n\twant: (request: object[string: any])",
 		},
@@ -6555,21 +7552,21 @@ func TestCompilerMockFunction(t *testing.T) {
 			note: "invalid ref: arity mismatch (in call)",
 			module: `package test
 				http_send(_, _) = { "body": "nope" }
-				p { http.send({}) with http.send as http_send }
+				p if { http.send({}) with http.send as http_send }
 			`,
 			err: "rego_type_error: http.send: arity mismatch\n\thave: (any, any)\n\twant: (request: object[string: any])",
 		},
 		{
 			note: "invalid ref: value another built-in with different type",
 			module: `package test
-				p { true with http.send as net.lookup_ip_addr }
+				p if { true with http.send as net.lookup_ip_addr }
 			`,
 			err: "rego_type_error: http.send: arity mismatch\n\thave: (string)\n\twant: (request: object[string: any])",
 		},
 		{
 			note: "ref: value another built-in with compatible type",
 			module: `package test
-				p { true with count as object.union_n }
+				p if { true with count as object.union_n }
 			`,
 		},
 		{
@@ -6579,7 +7576,7 @@ func TestCompilerMockFunction(t *testing.T) {
 			`,
 			module: `package test
 				import data.mocks
-				p { true with http.send as mocks.http_send }
+				p if { true with http.send as mocks.http_send }
 			`,
 		},
 		{
@@ -6589,14 +7586,14 @@ func TestCompilerMockFunction(t *testing.T) {
 			`,
 			module: `package test
 				import data.mocks.http_send
-				p { true with http.send as http_send }
+				p if { true with http.send as http_send }
 			`,
 		},
 		{
 			note: "invalid target: relation",
 			module: `package test
 				my_walk(_, _)
-				p { true with walk as my_walk }
+				p if { true with walk as my_walk }
 			`,
 			err: "rego_compile_error: with keyword replacing built-in function: target must not be a relation",
 		},
@@ -6604,21 +7601,21 @@ func TestCompilerMockFunction(t *testing.T) {
 			note: "invalid target: eq",
 			module: `package test
 				my_eq(_, _)
-				p { true with eq as my_eq }
+				p if { true with eq as my_eq }
 			`,
 			err: `rego_compile_error: with keyword replacing built-in function: replacement of "eq" invalid`,
 		},
 		{
 			note: "invalid target: rego.metadata.chain",
 			module: `package test
-				p { true with rego.metadata.chain as [] }
+				p if { true with rego.metadata.chain as [] }
 			`,
 			err: `rego_compile_error: with keyword replacing built-in function: replacement of "rego.metadata.chain" invalid`,
 		},
 		{
 			note: "invalid target: rego.metadata.rule",
 			module: `package test
-				p { true with rego.metadata.rule as {} }
+				p if { true with rego.metadata.rule as {} }
 			`,
 			err: `rego_compile_error: with keyword replacing built-in function: replacement of "rego.metadata.rule" invalid`,
 		},
@@ -6626,7 +7623,7 @@ func TestCompilerMockFunction(t *testing.T) {
 			note: "invalid target: internal.print",
 			module: `package test
 				my_print(_, _)
-				p { true with internal.print as my_print }
+				p if { true with internal.print as my_print }
 			`,
 			err: `rego_compile_error: with keyword replacing built-in function: replacement of internal function "internal.print" invalid`,
 		},
@@ -6635,14 +7632,14 @@ func TestCompilerMockFunction(t *testing.T) {
 			module: `package test
 				mock(_)
 				mock_mock(_)
-				p { bar(foo.bar("one")) with bar as mock with foo.bar as mock_mock }
+				p if { bar(foo.bar("one")) with bar as mock with foo.bar as mock_mock }
 			`,
 		},
 		{
 			note: "non-built-in function replaced value",
 			module: `package test
 				original(_)
-				p { original(true) with original as 123 }
+				p if { original(true) with original as 123 }
 			`,
 		},
 		{
@@ -6650,7 +7647,7 @@ func TestCompilerMockFunction(t *testing.T) {
 			module: `package test
 				original() = 1
 				mock() = 2
-				p { original() with original as mock }
+				p if { original() with original as mock }
 			`,
 			err: "rego_type_error: undefined function data.test.original", // TODO(sr): file bug -- this doesn't depend on "with" used or not
 		},
@@ -6659,14 +7656,14 @@ func TestCompilerMockFunction(t *testing.T) {
 			module: `package test
 				original(_)
 				mock(_)
-				p { original(true) with original as mock }
+				p if { original(true) with original as mock }
 			`,
 		},
 		{
 			note: "non-built-in function replaced by built-in",
 			module: `package test
 				original(_)
-				p { original([1]) with original as count }
+				p if { original([1]) with original as count }
 			`,
 		},
 		{
@@ -6674,7 +7671,7 @@ func TestCompilerMockFunction(t *testing.T) {
 			module: `package test
 				original(_)
 				mock(_, _)
-				p { original([1]) with original as mock }
+				p if { original([1]) with original as mock }
 			`,
 			err: "rego_type_error: data.test.original: arity mismatch\n\thave: (any, any)\n\twant: (any)",
 		},
@@ -6682,7 +7679,7 @@ func TestCompilerMockFunction(t *testing.T) {
 			note: "non-built-in function replaced by built-in, arity mismatch",
 			module: `package test
 				original(_)
-				p { original([1]) with original as concat }
+				p if { original([1]) with original as concat }
 			`,
 			err: "rego_type_error: data.test.original: arity mismatch\n\thave: (string, any<array[string], set[string]>)\n\twant: (any)",
 		},
@@ -6701,9 +7698,9 @@ func TestCompilerMockFunction(t *testing.T) {
 				},
 			})
 			if tc.extra != "" {
-				c.Modules["extra"] = MustParseModule(tc.extra)
+				c.Modules["extra"] = module(tc.extra)
 			}
-			c.Modules["test"] = MustParseModule(tc.module)
+			c.Modules["test"] = module(tc.module)
 
 			// NOTE(sr): We're running all compiler stages here, since the type checking of
 			// built-in function replacements happens at the type check stage.
@@ -6724,10 +7721,10 @@ func TestCompilerMockFunction(t *testing.T) {
 func TestCompilerMockVirtualDocumentPartially(t *testing.T) {
 	c := NewCompiler()
 
-	c.Modules["test"] = MustParseModule(`
+	c.Modules["test"] = module(`
 	package test
 	p = {"a": 1}
-	q = x { p = x with p.a as 2 }
+	q = x if { p = x with p.a as 2 }
 	`)
 
 	compileStages(c, c.rewriteWithModifiers)
@@ -6751,7 +7748,7 @@ func TestCompilerCheckUnusedAssignedVar(t *testing.T) {
 		{
 			note: "simple rule with wildcard",
 			module: `package test
-				p {
+				p if {
 					_ := 1
 				}
 			`,
@@ -6759,7 +7756,7 @@ func TestCompilerCheckUnusedAssignedVar(t *testing.T) {
 		{
 			note: "simple rule",
 			module: `package test
-				p {
+				p if {
 					x := 1
 					y := 2
 					z := x + 3
@@ -6773,7 +7770,7 @@ func TestCompilerCheckUnusedAssignedVar(t *testing.T) {
 		{
 			note: "rule with return",
 			module: `package test
-				p = x {
+				p = x if {
 					x := 2
 					y := 3
 				}
@@ -6785,7 +7782,7 @@ func TestCompilerCheckUnusedAssignedVar(t *testing.T) {
 		{
 			note: "rule with function call",
 			module: `package test
-				p {
+				p if {
 					x := 2
 					y := f(x)
 				}
@@ -6797,7 +7794,7 @@ func TestCompilerCheckUnusedAssignedVar(t *testing.T) {
 		{
 			note: "rule with nested array comprehension",
 			module: `package test
-				p {
+				p if {
 					x := 2
 					y := [z | z := 2 * x]
 				}
@@ -6809,7 +7806,7 @@ func TestCompilerCheckUnusedAssignedVar(t *testing.T) {
 		{
 			note: "rule with nested array comprehension and shadowing",
 			module: `package test
-				p {
+				p if {
 					x := 2
 					y := [x | x := 2 * x]
 				}
@@ -6821,7 +7818,7 @@ func TestCompilerCheckUnusedAssignedVar(t *testing.T) {
 		{
 			note: "rule with nested array comprehension and shadowing (unused shadowed var)",
 			module: `package test
-				p {
+				p if {
 					x := 2
 					y := [x | x := 2]
 				}
@@ -6834,7 +7831,7 @@ func TestCompilerCheckUnusedAssignedVar(t *testing.T) {
 		{
 			note: "rule with nested array comprehension and shadowing (unused shadowing var)",
 			module: `package test
-				p {
+				p if {
 					x := 2
 					x > 1
 					[1 | x := 2]
@@ -6847,7 +7844,7 @@ func TestCompilerCheckUnusedAssignedVar(t *testing.T) {
 		{
 			note: "rule with nested array comprehension and some declaration",
 			module: `package test
-				p {
+				p if {
 					some i
 					_ := [z | z := [1, 2][i]]
 				}
@@ -6856,7 +7853,7 @@ func TestCompilerCheckUnusedAssignedVar(t *testing.T) {
 		{
 			note: "rule with nested set comprehension",
 			module: `package test
-				p {
+				p if {
 					x := 2
 					y := {z | z := 2 * x}
 				}
@@ -6868,7 +7865,7 @@ func TestCompilerCheckUnusedAssignedVar(t *testing.T) {
 		{
 			note: "rule with nested set comprehension and unused inner var",
 			module: `package test
-				p {
+				p if {
 					x := 2
 					y := {z | z := 2 * x; a := 2}
 				}
@@ -6880,7 +7877,7 @@ func TestCompilerCheckUnusedAssignedVar(t *testing.T) {
 		{
 			note: "rule with nested object comprehension",
 			module: `package test
-				p {
+				p if {
 					x := 2
 					y := {z: x | z := 2 * x}
 				}
@@ -6892,7 +7889,7 @@ func TestCompilerCheckUnusedAssignedVar(t *testing.T) {
 		{
 			note: "rule with nested closure",
 			module: `package test
-				p {
+				p if {
 					x := 1
 					a := 1
 					{ y | y := [ z | z:=[1,2,3][a]; z > 1 ][_] }
@@ -6905,7 +7902,7 @@ func TestCompilerCheckUnusedAssignedVar(t *testing.T) {
 		{
 			note: "rule with nested closure and unused inner var",
 			module: `package test
-				p {
+				p if {
 					x := 1
 					{ y | y := [ z | z:=[1,2,3][x]; z > 1; a := 2 ][_] }
 				}
@@ -6917,7 +7914,7 @@ func TestCompilerCheckUnusedAssignedVar(t *testing.T) {
 		{
 			note: "simple function",
 			module: `package test
-				f() {
+				f() if {
 					x := 1
 					y := 2
 				}
@@ -6930,7 +7927,7 @@ func TestCompilerCheckUnusedAssignedVar(t *testing.T) {
 		{
 			note: "simple function with wildcard",
 			module: `package test
-				f() {
+				f() if {
 					x := 1
 					_ := 2
 				}
@@ -6942,7 +7939,7 @@ func TestCompilerCheckUnusedAssignedVar(t *testing.T) {
 		{
 			note: "function with return",
 			module: `package test
-				f() = x {
+				f() = x if {
 					x := 1
 					y := 2
 				}
@@ -7146,7 +8143,7 @@ func TestCompilerCheckUnusedAssignedVar(t *testing.T) {
 		{
 			note: "every: unused assigned var in body",
 			module: `package test
-				p { every i in [1] { y := 10; i == 1 } }
+				p if { every i in [1] { y := 10; i == 1 } }
 			`,
 			expectedErrors: Errors{
 				&Error{Message: "assigned var y unused"},
@@ -7155,7 +8152,7 @@ func TestCompilerCheckUnusedAssignedVar(t *testing.T) {
 		{
 			note: "general ref in rule head",
 			module: `package test
-						p[q].r[s] := 1 {
+						p[q].r[s] := 1 if {
 							q := "foo"
 							s := "bar"
 							t := "baz"
@@ -7168,7 +8165,7 @@ func TestCompilerCheckUnusedAssignedVar(t *testing.T) {
 		{
 			note: "general ref in rule head (no errors)",
 			module: `package test
-						p[q].r[s] := 1 {
+						p[q].r[s] := 1 if {
 							q := "foo"
 							s := "bar"
 						}
@@ -7180,9 +8177,8 @@ func TestCompilerCheckUnusedAssignedVar(t *testing.T) {
 	makeTestRunner := func(tc testCase, strict bool) func(t *testing.T) {
 		return func(t *testing.T) {
 			compiler := NewCompiler().WithStrict(strict)
-			opts := ParserOptions{AllFutureKeywords: true, unreleasedKeywords: true}
 			compiler.Modules = map[string]*Module{
-				"test": MustParseModuleWithOpts(tc.module, opts),
+				"test": module(tc.module),
 			}
 			compileStages(compiler, compiler.rewriteLocalVars)
 
@@ -7203,22 +8199,22 @@ func TestCompilerCheckUnusedAssignedVar(t *testing.T) {
 func TestCompilerSetGraph(t *testing.T) {
 	c := NewCompiler()
 	c.Modules = getCompilerTestModules()
-	c.Modules["elsekw"] = MustParseModule(`
+	c.Modules["elsekw"] = module(`
 	package elsekw
 
-	p {
+	p if {
 		false
-	} else = q {
+	} else = q if {
 		false
-	} else {
+	} else if {
 		r
 	}
 
 	q = true
 	r = true
 
-	s { t }
-	t { false } else { true }
+	s if { t }
+	t if { false } else if { true }
 
 	`)
 	compileStages(c, c.setGraph)
@@ -7323,14 +8319,14 @@ func TestCompilerSetGraph(t *testing.T) {
 func TestGraphCycle(t *testing.T) {
 	mod1 := `package a.b.c
 
-	p { q }
-	q { r }
-	r { s }
-	s { q }`
+	p if { q }
+	q if { r }
+	r if { s }
+	s if { q }`
 
 	c := NewCompiler()
 	c.Modules = map[string]*Module{
-		"mod1": MustParseModule(mod1),
+		"mod1": module(mod1),
 	}
 
 	compileStages(c, c.setGraph)
@@ -7343,26 +8339,26 @@ func TestGraphCycle(t *testing.T) {
 
 	elsekw := `package elsekw
 
-	p {
+	p if {
 		false
-	} else = q {
+	} else = q if {
 		true
 	}
 
-	q {
+	q if {
 		false
-	} else {
+	} else if {
 		r
 	}
 
-	r { s }
+	r if { s }
 
-	s { p }
+	s if { p }
 	`
 
 	c = NewCompiler()
 	c.Modules = map[string]*Module{
-		"elsekw": MustParseModule(elsekw),
+		"elsekw": module(elsekw),
 	}
 
 	compileStages(c, c.setGraph)
@@ -7378,105 +8374,105 @@ func TestGraphCycle(t *testing.T) {
 func TestCompilerCheckRecursion(t *testing.T) {
 	c := NewCompiler()
 	c.Modules = map[string]*Module{
-		"newMod1": MustParseModule(`package rec
+		"newMod1": module(`package rec
 
-s = true { t }
-t = true { s }
-a = true { b }
-b = true { c }
-c = true { d; e }
-d = true { true }
-e = true { a }`),
-		"newMod2": MustParseModule(`package rec
+s = true if { t }
+t = true if { s }
+a = true if { b }
+b = true if { c }
+c = true if { d; e }
+d = true if { true }
+e = true if { a }`),
+		"newMod2": module(`package rec
 
-x = true { s }`,
+x = true if { s }`,
 		),
-		"newMod3": MustParseModule(`package rec2
+		"newMod3": module(`package rec2
 
 import data.rec.x
 
-y = true { x }`),
-		"newMod4": MustParseModule(`package rec3
+y = true if { x }`),
+		"newMod4": module(`package rec3
 
-p[x] = y { data.rec4[x][y] = z }`,
+p[x] = y if { data.rec4[x][y] = z }`,
 		),
-		"newMod5": MustParseModule(`package rec4
+		"newMod5": module(`package rec4
 
 import data.rec3.p
 
-q[x] = y { p[x] = y }`),
-		"newMod6": MustParseModule(`package rec5
+q[x] = y if { p[x] = y }`),
+		"newMod6": module(`package rec5
 
-acp[x] { acq[x] }
-acq[x] { a = [true | acp[_]]; a[_] = x }
+acp contains x if { acq[x] }
+acq contains x if { a = [true | acp[_]]; a[_] = x }
 `,
 		),
-		"newMod7": MustParseModule(`package rec6
+		"newMod7": module(`package rec6
 
-np[x] = y { data.a[data.b.c[nq[x]]] = y }
-nq[x] = y { data.d[data.e[x].f[np[y]]] }`,
+np[x] = y if { data.a[data.b.c[nq[x]]] = y }
+nq[x] = y if { data.d[data.e[x].f[np[y]]] }`,
 		),
-		"newMod8": MustParseModule(`package rec7
+		"newMod8": module(`package rec7
 
-prefix = true { data.rec7 }`,
+prefix = true if { data.rec7 }`,
 		),
-		"newMod9": MustParseModule(`package rec8
+		"newMod9": module(`package rec8
 
-dataref = true { data }`,
+dataref = true if { data }`,
 		),
-		"newMod10": MustParseModule(`package rec9
+		"newMod10": module(`package rec9
 
-		else_self { false } else { else_self }
+		else_self if { false } else if { else_self }
 
-		elsetop {
+		elsetop if {
 			false
-		} else = elsemid {
+		} else = elsemid if {
 			true
 		}
 
-		elsemid {
+		elsemid if {
 			false
-		} else {
+		} else if {
 			elsebottom
 		}
 
-		elsebottom { elsetop }
+		elsebottom if { elsetop }
 		`),
-		"fnMod1": MustParseModule(`package f0
+		"fnMod1": module(`package f0
 
-		fn(x) = y {
+		fn(x) = y if {
 			fn(x, y)
 		}`),
-		"fnMod2": MustParseModule(`package f1
+		"fnMod2": module(`package f1
 
-		foo(x) = y {
+		foo(x) = y if {
 			bar("buz", x, y)
 		}
 
-		bar(x, y) = z {
+		bar(x, y) = z if {
 			foo([x, y], z)
 		}`),
-		"fnMod3": MustParseModule(`package f2
+		"fnMod3": module(`package f2
 
-		foo(x) = y {
+		foo(x) = y if {
 			bar("buz", x, y)
 		}
 
-		bar(x, y) = z {
+		bar(x, y) = z if {
 			x = p[y]
 			z = x
 		}
 
-		p[x] = y {
+		p[x] = y if {
 			x = "foo.bar"
 			foo(x, y)
 		}`),
-		"everyMod": MustParseModule(`package everymod
+		"everyMod": module(`package everymod
 		import future.keywords.every
-		everyp {
+		everyp if {
 			every x in [true, false] { x; everyp }
 		}
-		everyq[1] {
+		everyq contains 1 if {
 			every x in everyq { x == 1 }
 		}`),
 	}
@@ -7545,19 +8541,19 @@ func TestCompilerCheckDynamicRecursion(t *testing.T) {
 	}{
 		{
 			note: "recursion",
-			mod: MustParseModule(`
+			mod: module(`
 package recursion
 pkg = "recursion"
-foo[x] {
+foo contains x if {
 	data[pkg]["foo"][x]
 }
 `),
 			err: "rego_recursion_error: rule data.recursion.foo is recursive: data.recursion.foo -> data.recursion.foo",
 		},
 		{note: "system.main",
-			mod: MustParseModule(`
+			mod: module(`
 package system.main
-foo {
+foo if {
 	data[input]
 }
 `),
@@ -7586,21 +8582,21 @@ func TestCompilerCheckPartialRuleRecursion(t *testing.T) {
 	policy := `package test
 
 # R1
-results[id] := 1 {
+results[id] := 1 if {
   id := "bar"
 }
 
 # R2
-results.foo := 2 {
+results.foo := 2 if {
   final_allow
 }
 
 # R3
-final_allow {
+final_allow if {
   results.foo == 3
 }`
 	c := NewCompiler()
-	c.Modules = map[string]*Module{"test": MustParseModule(policy)}
+	c.Modules = map[string]*Module{"test": module(policy)}
 	compileStages(c, c.checkRecursion)
 
 	expected := Errors{
@@ -7619,9 +8615,9 @@ func TestCompilerCheckVoidCalls(t *testing.T) {
 		},
 	}})
 	c.Compile(map[string]*Module{
-		"test.rego": MustParseModule(`package test
+		"test.rego": module(`package test
 
-		p {
+		p if {
 			x = test(true)
 		}`),
 	})
@@ -7636,10 +8632,10 @@ func TestCompilerGetRulesExact(t *testing.T) {
 	mods := getCompilerTestModules()
 
 	// Add incrementally defined rules.
-	mods["mod-incr"] = MustParseModule(`package a.b.c
+	mods["mod-incr"] = module(`package a.b.c
 
-p[1] { true }
-p[2] { true }`,
+p contains 1 if { true }
+p contains 2 if { true }`,
 	)
 
 	c := NewCompiler()
@@ -7695,10 +8691,10 @@ func TestCompilerGetRulesForVirtualDocument(t *testing.T) {
 	mods := getCompilerTestModules()
 
 	// Add incrementally defined rules.
-	mods["mod-incr"] = MustParseModule(`package a.b.c
+	mods["mod-incr"] = module(`package a.b.c
 
-p[1] { true }
-p[2] { true }`,
+p contains 1 if { true }
+p contains 2 if { true }`,
 	)
 
 	c := NewCompiler()
@@ -7758,11 +8754,11 @@ func TestCompilerGetRulesWithPrefix(t *testing.T) {
 	mods := getCompilerTestModules()
 
 	// Add incrementally defined rules.
-	mods["mod-incr"] = MustParseModule(`package a.b.c
+	mods["mod-incr"] = module(`package a.b.c
 
-p[1] { true }
-p[2] { true }
-q[3] { true }`,
+p contains 1 if { true }
+p contains 2 if { true }
+q contains 3 if { true }`,
 	)
 
 	c := NewCompiler()
@@ -7826,9 +8822,9 @@ func TestCompilerGetRules(t *testing.T) {
 	compiler := getCompilerWithParsedModules(map[string]string{
 		"mod1": `package a.b.c
 
-p[x] = y { q[x] = y }
-q["a"] = 1 { true }
-q["b"] = 2 { true }`,
+p[x] = y if { q[x] = y }
+q["a"] = 1 if { true }
+q["b"] = 2 if { true }`,
 	})
 
 	compileStages(compiler, nil)
@@ -7885,9 +8881,9 @@ r3 = 3`,
 		"hidden": `package system.hidden
 r4 = 4`,
 		"mod4": `package b.c
-r5[x] = 5 { x := "foo" }
-r5.bar = 6 { input.x }
-r5.baz = 7 { input.y }
+r5[x] = 5 if { x := "foo" }
+r5.bar = 6 if { input.x }
+r5.baz = 7 if { input.y }
 `,
 	})
 
@@ -7966,11 +8962,11 @@ func TestCompileCustomBuiltins(t *testing.T) {
 	})
 
 	compiler.Compile(map[string]*Module{
-		"test.rego": MustParseModule(`
+		"test.rego": module(`
 			package test
 
-			p { baz("x") = x }
-			q { foo.bar("x") = x }
+			p if { baz("x") = x }
+			q if { foo.bar("x") = x }
 		`),
 	})
 
@@ -7998,11 +8994,11 @@ func TestCompileCustomBuiltins(t *testing.T) {
 	}
 
 	compiler.Compile(map[string]*Module{
-		"test.rego": MustParseModule(`
+		"test.rego": module(`
 			package test
 
-			p { baz(1) = x }  # type error
-			q { foo.bar(1) = x }  # type error
+			p if { baz(1) = x }  # type error
+			q if { foo.bar(1) = x }  # type error
 		`),
 	})
 
@@ -8030,38 +9026,38 @@ func TestCompilerLazyLoadingError(t *testing.T) {
 
 func TestCompilerLazyLoading(t *testing.T) {
 
-	mod1 := MustParseModule(`package a.b.c
+	mod1 := module(`package a.b.c
 
 import data.x.z1 as z2
 
-p = true { q; r }
-q = true { z2 }`)
+p = true if { q; r }
+q = true if { z2 }`)
 	orig1 := mod1.Copy()
 
-	mod2 := MustParseModule(`package a.b.c
+	mod2 := module(`package a.b.c
 
-r = true { true }`)
+r = true if { true }`)
 	orig2 := mod2.Copy()
 
-	mod3 := MustParseModule(`package x
+	mod3 := module(`package x
 
 import data.foo.bar
 import input.input
 
-z1 = true { [localvar | count(bar.baz.qux, localvar)] }`)
+z1 = true if { [localvar | count(bar.baz.qux, localvar)] }`)
 	orig3 := mod3.Copy()
 
-	mod4 := MustParseModule(`package foo.bar.baz
+	mod4 := module(`package foo.bar.baz
 
-qux = grault { true }`)
+qux = grault if { true }`)
 	orig4 := mod4.Copy()
 
-	mod5 := MustParseModule(`package foo.bar.baz
+	mod5 := module(`package foo.bar.baz
 
 import data.d.e.f
 
-deadbeef = f { true }
-grault = deadbeef { true }`)
+deadbeef = f if { true }
+grault = deadbeef if { true }`)
 	orig5 := mod5.Copy()
 
 	// testLoader will return 4 rounds of parsed modules.
@@ -8072,6 +9068,8 @@ grault = deadbeef { true }`)
 		{"mod5": mod5},
 	}
 
+	popts := ParserOptions{AllFutureKeywords: true, unreleasedKeywords: true}
+
 	// For each round, run checks.
 	tests := []func(map[string]*Module){
 		func(map[string]*Module) {
@@ -8079,30 +9077,30 @@ grault = deadbeef { true }`)
 			// collection.
 		},
 		func(partial map[string]*Module) {
-			p := MustParseRule(`p = true { data.a.b.c.q; data.a.b.c.r }`)
+			p := MustParseRuleWithOpts(`p = true { data.a.b.c.q; data.a.b.c.r }`, popts)
 			if !partial["mod1"].Rules[0].Equal(p) {
 				t.Errorf("Expected %v but got %v", p, partial["mod1"].Rules[0])
 			}
-			q := MustParseRule(`q = true { data.x.z1 }`)
+			q := MustParseRuleWithOpts(`q = true { data.x.z1 }`, popts)
 			if !partial["mod1"].Rules[1].Equal(q) {
 				t.Errorf("Expected %v but got %v", q, partial["mod1"].Rules[0])
 			}
 		},
 		func(partial map[string]*Module) {
-			z1 := MustParseRule(`z1 = true { [localvar | count(data.foo.bar.baz.qux, localvar)] }`)
+			z1 := MustParseRuleWithOpts(`z1 = true { [localvar | count(data.foo.bar.baz.qux, localvar)] }`, popts)
 			if !partial["mod3"].Rules[0].Equal(z1) {
 				t.Errorf("Expected %v but got %v", z1, partial["mod3"].Rules[0])
 			}
 		},
 		func(partial map[string]*Module) {
-			qux := MustParseRule(`qux = grault { true }`)
+			qux := MustParseRuleWithOpts(`qux = grault { true }`, popts)
 			if !partial["mod4"].Rules[0].Equal(qux) {
 				t.Errorf("Expected %v but got %v", qux, partial["mod4"].Rules[0])
 			}
 		},
 		func(partial map[string]*Module) {
-			grault := MustParseRule(`qux = data.foo.bar.baz.grault { true }`) // rewrite has not happened yet
-			f := MustParseRule(`deadbeef = data.d.e.f { true }`)
+			grault := MustParseRuleWithOpts(`qux = data.foo.bar.baz.grault { true }`, popts) // rewrite has not happened yet
+			f := MustParseRuleWithOpts(`deadbeef = data.d.e.f { true }`, popts)
 			if !partial["mod4"].Rules[0].Equal(grault) {
 				t.Errorf("Expected %v but got %v", grault, partial["mod4"].Rules[0])
 			}
@@ -8139,7 +9137,7 @@ grault = deadbeef { true }`)
 func TestCompilerWithMetrics(t *testing.T) {
 	m := metrics.New()
 	c := NewCompiler().WithMetrics(m)
-	mod := MustParseModule(testModule)
+	mod := MustParseModuleWithOpts(testModule, ParserOptions{AllFutureKeywords: true})
 
 	c.Compile(map[string]*Module{"testMod": mod})
 	assertNotFailed(t, c)
@@ -8158,7 +9156,7 @@ func TestCompilerWithStageAfterWithMetrics(t *testing.T) {
 
 	c.WithMetrics(m)
 
-	mod := MustParseModule(testModule)
+	mod := MustParseModuleWithOpts(testModule, ParserOptions{AllFutureKeywords: true})
 
 	c.Compile(map[string]*Module{"testMod": mod})
 	assertNotFailed(t, c)
@@ -8185,7 +9183,7 @@ func TestCompilerBuildComprehensionIndexKeySet(t *testing.T) {
 			module: `
 				package test
 
-				p {
+				p if {
 					value = input[i]
 					keys = [j | value = input[j]]
 				}
@@ -8201,7 +9199,7 @@ func TestCompilerBuildComprehensionIndexKeySet(t *testing.T) {
 			module: `
 				package test
 
-				p {
+				p if {
 					v1 = input[i].v1
 					v2 = input[i].v2
 					keys = [j | v1 = input[j].v1; v2 = input[j].v2]
@@ -8235,7 +9233,7 @@ func TestCompilerBuildComprehensionIndexKeySet(t *testing.T) {
 			module: `
 				package test
 
-				p {
+				p if {
 					[v | input[i] = v]  # skip because no assignment
 				}`,
 			wantDebug: 0,
@@ -8245,7 +9243,7 @@ func TestCompilerBuildComprehensionIndexKeySet(t *testing.T) {
 			module: `
 				package test
 
-				p {
+				p if {
 					v = input[i]
 					ks = [j | input[j] = v] with data.x as 1  # skip because of with modifier
 				}`,
@@ -8256,7 +9254,7 @@ func TestCompilerBuildComprehensionIndexKeySet(t *testing.T) {
 			module: `
 				package test
 
-				p {
+				p if {
 					v = input[i]
 					a = []
 					not a = [j | input[j] = v] # skip due to negation
@@ -8268,7 +9266,7 @@ func TestCompilerBuildComprehensionIndexKeySet(t *testing.T) {
 			module: `
 				package test
 
-				p {
+				p if {
 					v = input[i]
 				}`,
 			wantDebug: 0, // nothing interesting to report here
@@ -8278,7 +9276,7 @@ func TestCompilerBuildComprehensionIndexKeySet(t *testing.T) {
 			module: `
 				package test
 
-				f(x) {
+				f(x) if {
 					v = input[i]
 					ys = [y | y = x[j]]  # x is not safe
 				}`,
@@ -8289,7 +9287,7 @@ func TestCompilerBuildComprehensionIndexKeySet(t *testing.T) {
 			module: `
 				package test
 
-				p {
+				p if {
 					ys = [y | y = input[j]]
 				}`,
 			wantDebug: 1,
@@ -8299,7 +9297,7 @@ func TestCompilerBuildComprehensionIndexKeySet(t *testing.T) {
 			module: `
 				package test
 
-				p {
+				p if {
 					x = input[i]                # 'x' is a candidate for z (line 7)
 					y = 2                       # 'y' is a candidate for z
 					z = [1 |
@@ -8320,7 +9318,7 @@ func TestCompilerBuildComprehensionIndexKeySet(t *testing.T) {
 			module: `
 				package test
 
-				f(x) {
+				f(x) if {
 					y = input[x]
 					ys = [y | y = input[x]]
 				}`,
@@ -8331,7 +9329,7 @@ func TestCompilerBuildComprehensionIndexKeySet(t *testing.T) {
 			module: `
 				package test
 
-				p[x] {
+				p contains x if {
 					y = input[x]
 					ys = [y | y = input[x]]
 				}`,
@@ -8342,7 +9340,7 @@ func TestCompilerBuildComprehensionIndexKeySet(t *testing.T) {
 			module: `
 				package test
 
-				p[x] {
+				p contains x if {
 					y = input.bar[x]
 					ys = [y | a = input.foo; walk(a, [x, y])]
 				}`,
@@ -8353,7 +9351,7 @@ func TestCompilerBuildComprehensionIndexKeySet(t *testing.T) {
 			module: `
 				package test
 
-				p[x] {
+				p contains x if {
 					y = input[x]
 					ys = [y | y = input[z]; z = x]
 				}`,
@@ -8370,7 +9368,7 @@ func TestCompilerBuildComprehensionIndexKeySet(t *testing.T) {
 			dbg := bytes.Buffer{}
 			m := metrics.New()
 			compiler := NewCompiler().WithMetrics(m).WithDebug(&dbg)
-			mod, err := ParseModule("test.rego", tc.module)
+			mod, err := ParseModuleWithOpts("test.rego", tc.module, ParserOptions{AllFutureKeywords: true, unreleasedKeywords: true})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -8437,6 +9435,145 @@ func TestCompilerBuildComprehensionIndexKeySet(t *testing.T) {
 	}
 }
 
+func TestCompilerBuildRequiredCapabilities(t *testing.T) {
+	tests := []struct {
+		note     string
+		module   string
+		opts     CompileOpts
+		builtins []string
+		features []string
+		keywords []string
+	}{
+		{
+			note: "trivial v0",
+			module: `
+				package x
+
+				p { input > 7 }
+			`,
+			opts:     CompileOpts{ParserOptions: ParserOptions{RegoVersion: RegoV0}},
+			builtins: []string{"eq", "gt"},
+		},
+		{
+			note: "trivial v1",
+			module: `
+				package x
+
+				p if { input > 7 }
+			`,
+			opts:     CompileOpts{ParserOptions: ParserOptions{RegoVersion: RegoV1}},
+			builtins: []string{"eq", "gt"},
+		},
+		{
+			note: "rego.v1 import",
+			module: `
+				package x
+
+				import rego.v1
+
+				p if { true }
+			`,
+			features: []string{"rego_v1_import"},
+		},
+		{
+			note: "future.keywords wildcard",
+			module: `
+				package x
+
+				import future.keywords
+			`,
+			keywords: []string{"contains", "every", "if", "in"},
+		},
+		{
+			note: "future.keywords specific",
+			module: `
+				package x
+
+				import future.keywords.in
+				import future.keywords.if
+				import future.keywords.contains
+				import future.keywords.every
+			`,
+			keywords: []string{"contains", "every", "if", "in"},
+		},
+		{
+			note: "rewriting erases assignment",
+			module: `
+				package x
+
+				p if { a := 7 }
+			`,
+			opts:     CompileOpts{ParserOptions: ParserOptions{RegoVersion: RegoV1}},
+			builtins: []string{"assign", "eq"},
+		},
+		{
+			note: "rewriting erases equals",
+			module: `
+				package x
+
+				p if { input == 7 }
+			`,
+			opts:     CompileOpts{ParserOptions: ParserOptions{RegoVersion: RegoV1}},
+			builtins: []string{"eq", "equal"},
+		},
+		{
+			note: "rewriting erases print",
+			module: `
+				package x
+
+				p if { print(7) }
+			`,
+			opts:     CompileOpts{EnablePrintStatements: true, ParserOptions: ParserOptions{RegoVersion: RegoV1}},
+			builtins: []string{"eq", "internal.print", "print"},
+		},
+
+		{
+			note: "rewriting erases print but disabled",
+			module: `
+				package x
+
+				p if { print(7) }
+			`,
+			opts:     CompileOpts{EnablePrintStatements: false, ParserOptions: ParserOptions{RegoVersion: RegoV1}},
+			builtins: []string{"print"}, // only print required because compiler will replace with true
+		},
+		{
+			note: "dots in the head",
+			module: `
+				package x
+
+				a.b.c := 7
+			`,
+			features: []string{"rule_head_ref_string_prefixes"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.note, func(t *testing.T) {
+			compiler := MustCompileModulesWithOpts(map[string]string{
+				"test.rego": tc.module,
+			}, tc.opts)
+
+			var names []string
+			for i := range compiler.Required.Builtins {
+				names = append(names, compiler.Required.Builtins[i].Name)
+			}
+
+			if !reflect.DeepEqual(names, tc.builtins) {
+				t.Fatalf("expected builtins to be %v but got %v", tc.builtins, names)
+			}
+
+			if !reflect.DeepEqual(compiler.Required.FutureKeywords, tc.keywords) {
+				t.Fatalf("expected keywords to be %v but got %v", tc.keywords, compiler.Required.FutureKeywords)
+			}
+
+			if !reflect.DeepEqual(compiler.Required.Features, tc.features) {
+				t.Fatalf("expected features to be %v but got %v", tc.features, compiler.Required.Features)
+			}
+		})
+	}
+}
+
 func TestCompilerAllowMultipleAssignments(t *testing.T) {
 
 	_, err := CompileModules(map[string]string{"test.rego": `
@@ -8452,12 +9589,13 @@ func TestCompilerAllowMultipleAssignments(t *testing.T) {
 
 func TestQueryCompiler(t *testing.T) {
 	tests := []struct {
-		note     string
-		q        string
-		pkg      string
-		imports  []string
-		input    string
-		expected interface{}
+		note        string
+		q           string
+		pkg         string
+		imports     []string
+		input       string
+		regoVersion RegoVersion
+		expected    interface{}
 	}{
 		{
 			note:     "empty query",
@@ -8510,9 +9648,10 @@ func TestQueryCompiler(t *testing.T) {
 			expected: fmt.Errorf("1 error occurred: 1:1: rego_unsafe_var_error: var z is unsafe"),
 		},
 		{
-			note:     "unsafe var that is a future keyword",
-			q:        "1 in 2",
-			expected: fmt.Errorf("1 error occurred: 1:3: rego_unsafe_var_error: var in is unsafe (hint: `import future.keywords.in` to import a future keyword)"),
+			note:        "unsafe var that is a future keyword",
+			q:           "1 in 2",
+			expected:    fmt.Errorf("1 error occurred: 1:3: rego_unsafe_var_error: var in is unsafe (hint: `import future.keywords.in` to import a future keyword)"),
+			regoVersion: RegoV0,
 		},
 		{
 			note:     "unsafe declared var",
@@ -8601,7 +9740,8 @@ func TestQueryCompiler(t *testing.T) {
 		},
 	}
 	for _, tc := range tests {
-		t.Run(tc.note, runQueryCompilerTest(tc.q, tc.pkg, tc.imports, tc.expected))
+		popts := ParserOptions{RegoVersion: tc.regoVersion}
+		t.Run(tc.note, runQueryCompilerTest(tc.q, popts, tc.pkg, tc.imports, tc.expected))
 	}
 }
 
@@ -8879,6 +10019,7 @@ func runStrictnessQueryTestCase(t *testing.T, cases []strictnessQueryTestCase) {
 }
 
 func assertCompilerErrorStrings(t *testing.T, compiler *Compiler, expected []string) {
+	t.Helper()
 	result := compilerErrsToStringSlice(compiler.Errors)
 
 	if len(result) != len(expected) {
@@ -8901,9 +10042,10 @@ func assertNotFailed(t *testing.T, c *Compiler) {
 func getCompilerWithParsedModules(mods map[string]string) *Compiler {
 
 	parsed := map[string]*Module{}
+	popts := ParserOptions{AllFutureKeywords: true, unreleasedKeywords: true}
 
 	for id, input := range mods {
-		mod, err := ParseModule(id, input)
+		mod, err := ParseModuleWithOpts(id, input, popts)
 		if err != nil {
 			panic(err)
 		}
@@ -8951,71 +10093,71 @@ func compileStages(c *Compiler, upto func()) {
 func getCompilerTestModules() map[string]*Module {
 
 	mod1 := MustParseModule(`package a.b.c
-
+import rego.v1
 import data.x.y.z as foo
 import data.g.h.k
 
-p[x] { q[x]; not r[x] }
-q[x] { foo[i] = x }
-z = 400 { true }`,
+p contains x if { q[x]; not r[x] }
+q contains x if { foo[i] = x }
+z = 400 if { true }`,
 	)
 
 	mod2 := MustParseModule(`package a.b.c
-
+import rego.v1
 import data.bar
 import data.x.y.p
 
-r[x] { bar[x] = 100; p = 101 }`)
+r contains x if { bar[x] = 100; p = 101 }`)
 
 	mod3 := MustParseModule(`package a.b.d
-
+import rego.v1
 import input.x as y
 
-t = true { input = {y.secret: [{y.keyid}]} }
-x = false { true }`)
+t = true if { input = {y.secret: [{y.keyid}]} }
+x = false if { true }`)
 
 	mod4 := MustParseModule(`package a.b.empty`)
 
 	mod5 := MustParseModule(`package a.b.compr
-
+import rego.v1
 import input.x as y
 import data.a.b.c.q
 
-p = true { [y.a | true] }
-r = true { [q.a | true] }
-s = true { [true | y.a = 0] }
-t = true { [true | q[i] = 1] }
-u = true { [true | _ = [y.a | true]] }
-v = true { [true | _ = [true | q[i] = 1]] }
+p = true if { [y.a | true] }
+r = true if { [q.a | true] }
+s = true if { [true | y.a = 0] }
+t = true if { [true | q[i] = 1] }
+u = true if { [true | _ = [y.a | true]] }
+v = true if { [true | _ = [true | q[i] = 1]] }
 `,
 	)
 
 	mod6 := MustParseModule(`package a.b.nested
-
+import rego.v1
 import data.x
 import data.z
 import input.x as y
 
-p = true { x[y[i].a[z.b[j]]] }
-q = true { x = v; v[y[i]] }
-r = 1 { true }
-s = true { x[r] }`,
+p = true if { x[y[i].a[z.b[j]]] }
+q = true if { x = v; v[y[i]] }
+r = 1 if { true }
+s = true if { x[r] }`,
 	)
 
 	mod7 := MustParseModule(`package a.b.funcs
-
-fn(x) = y {
+import rego.v1
+fn(x) = y if {
 	trim(x, ".", y)
 }
 
-bar([x, y]) = [a, [b, c]] {
+bar([x, y]) = [a, [b, c]] if {
 	fn(x, a)
 	y[1].b = b
 	y[i].a = "hi"
 	c = y[i].b
 }
 
-foorule = true {
+foorule = true if {
 	bar(["hi.there", [{"a": "hi", "b": 1}, {"a": "bye", "b": 0}]], [a, [b, c]])
 }`)
 
@@ -9040,14 +10182,14 @@ func compilerErrsToStringSlice(errors []*Error) []string {
 	return result
 }
 
-func runQueryCompilerTest(q, pkg string, imports []string, expected interface{}) func(*testing.T) {
+func runQueryCompilerTest(q string, popts ParserOptions, pkg string, imports []string, expected interface{}) func(*testing.T) {
 	return func(t *testing.T) {
 		t.Helper()
 		c := NewCompiler().WithEnablePrintStatements(false)
 		c.Compile(getCompilerTestModules())
 		assertNotFailed(t, c)
 		qc := c.QueryCompiler()
-		query := MustParseBody(q)
+		query := MustParseBodyWithOpts(q, popts)
 		var qctx *QueryContext
 
 		if pkg != "" {
@@ -9083,6 +10225,166 @@ func runQueryCompilerTest(q, pkg string, imports []string, expected interface{})
 	}
 }
 
+func TestCompilerCapabilitiesFeatures(t *testing.T) {
+	cases := []struct {
+		note        string
+		module      string
+		features    []string
+		expectedErr string
+	}{
+		{
+			note: "no features, no ref-head rules",
+			module: `package test
+				p := 42`,
+		},
+		{
+			note: "no features, ref-head rule",
+			module: `package test
+				p.q.r := 42`,
+			expectedErr: "rego_compile_error: rule heads with refs are not supported: p.q.r",
+		},
+		{
+			note: "no features, general-ref-head rule",
+			module: `package test
+				p[q].r[s] := 42 if { q := "foo"; s := "bar" }`,
+			expectedErr: "rego_compile_error: rule heads with refs are not supported: p[q].r[s]",
+		},
+		{
+			note: "string-prefix-ref-head feature, no ref-head rules",
+			features: []string{
+				FeatureRefHeadStringPrefixes,
+			},
+			module: `package test
+				p := 42`,
+		},
+		{
+			note: "string-prefix-ref-head feature, ref-head rule",
+			features: []string{
+				FeatureRefHeadStringPrefixes,
+			},
+			module: `package test
+				p.q.r := 42`,
+		},
+		{
+			note: "ref-head feature, ref-head rule",
+			features: []string{
+				FeatureRefHeads,
+			},
+			module: `package test
+				p.q.r := 42`,
+		},
+		{
+			note: "string-prefix-ref-head feature, general-ref-head rule",
+			features: []string{
+				FeatureRefHeadStringPrefixes,
+			},
+			module: `package test
+				p[q].r[s] := 42 if { q := "foo"; s := "bar" }`,
+			expectedErr: "rego_type_error: rule heads with general refs (containing variables) are not supported: p[q].r[s]",
+		},
+		{
+			note: "ref-head feature, general-ref-head rule",
+			features: []string{
+				FeatureRefHeads,
+			},
+			module: `package test
+				p[q].r[s] := 42 if { q := "foo"; s := "bar" }`,
+		},
+		{
+			note: "string-prefix-ref-head & ref-head features, general-ref-head rule",
+			features: []string{
+				FeatureRefHeadStringPrefixes,
+				FeatureRefHeads,
+			},
+			module: `package test
+				p[q].r[s] := 42 if { q := "foo"; s := "bar" }`,
+		},
+		{
+			note: "string-prefix-ref-head & ref-head features, ref-head rule",
+			features: []string{
+				FeatureRefHeadStringPrefixes,
+				FeatureRefHeads,
+			},
+			module: `package test
+				p.q.r := 42`,
+		},
+		{
+			note:     "no features, string-prefix-ref-head with contains kw",
+			features: []string{},
+			module: `package test
+				import future.keywords.contains
+				p.x contains 1`,
+			expectedErr: "rego_compile_error: rule heads with refs are not supported: p.x",
+		},
+		{
+			note: "string-prefix-ref-head feature, string-prefix-ref-head with contains kw",
+			features: []string{
+				FeatureRefHeadStringPrefixes,
+			},
+			module: `package test
+				import future.keywords.contains
+				p.x contains 1`,
+		},
+		{
+			note: "ref-head feature, string-prefix-ref-head with contains kw",
+			features: []string{
+				FeatureRefHeads,
+			},
+			module: `package test
+				import future.keywords.contains
+				p.x contains 1`,
+		},
+
+		{
+			note:     "no features, general-ref-head with contains kw",
+			features: []string{},
+			module: `package test
+				import future.keywords
+				p[x] contains 1 if x = "foo"`,
+			expectedErr: "rego_compile_error: rule heads with refs are not supported: p[x]",
+		},
+		{
+			note: "string-prefix-ref-head feature, general-ref-head with contains kw",
+			features: []string{
+				FeatureRefHeadStringPrefixes,
+			},
+			module: `package test
+				import future.keywords
+				p[x] contains 1 if x = "foo"`,
+			expectedErr: "rego_type_error: rule heads with general refs (containing variables) are not supported: p[x]",
+		},
+		{
+			note: "ref-head feature, general-ref-head with contains kw",
+			features: []string{
+				FeatureRefHeads,
+			},
+			module: `package test
+				import future.keywords
+				p[x] contains 1 if x = "foo"`,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.note, func(t *testing.T) {
+			capabilities := CapabilitiesForThisVersion()
+			capabilities.Features = tc.features
+
+			compiler := NewCompiler().WithCapabilities(capabilities)
+			compiler.Compile(map[string]*Module{"test": module(tc.module)})
+			if tc.expectedErr != "" {
+				if !compiler.Failed() {
+					t.Fatal("expected error but got success")
+				}
+				if !strings.Contains(compiler.Errors.Error(), tc.expectedErr) {
+					t.Fatalf("expected error:\n\n%s\n\nbut got:\n\n%v", tc.expectedErr, compiler.Errors)
+				}
+			} else if compiler.Failed() {
+				t.Fatalf("unexpected error(s): %v", compiler.Errors)
+			}
+		})
+	}
+}
+
 func TestCompilerCapabilitiesExtendedWithCustomBuiltins(t *testing.T) {
 
 	compiler := NewCompiler().WithCapabilities(&Capabilities{
@@ -9099,12 +10401,12 @@ func TestCompilerCapabilitiesExtendedWithCustomBuiltins(t *testing.T) {
 		},
 	})
 
-	module1 := MustParseModule(`package test
+	module1 := module(`package test
 
-	p { foo(1); bar(2) }`)
-	module2 := MustParseModule(`package test
+	p if { foo(1); bar(2) }`)
+	module2 := module(`package test
 
-	p { plus(1,2,x) }`)
+	p if { plus(1,2,x) }`)
 
 	compiler.Compile(map[string]*Module{"x": module1})
 	if compiler.Failed() {
@@ -9134,8 +10436,8 @@ func TestCompilerWithUnsafeBuiltins(t *testing.T) {
 	}
 
 	// These modules should not compile for the same reason.
-	modules := map[string]*Module{"mod1": MustParseModule(`package a.b.c
-deny {
+	modules := map[string]*Module{"mod1": module(`package a.b.c
+deny if {
     re_match(input.user, ".*bob.*")
 }`)}
 	compiler.Compile(modules)
@@ -9187,15 +10489,15 @@ package policy
 
 default allow := false
 
-allow {
+allow if {
     input.identity = "foo"
 }
 
-allow {
+allow if {
     input.path = ["foo", "bar"]
 }
 
-allow {
+allow if {
     input.params = {"foo": "bar"}
 }`
 
@@ -9204,7 +10506,7 @@ package policy
 
 default allow := false
 
-allow {
+allow if {
     input.identty = "foo"
 }`
 
@@ -9213,7 +10515,7 @@ package policy
 
 default allow := false
 
-allow {
+allow if {
     input.path = "foo"
 }`
 
@@ -9222,11 +10524,11 @@ package policy
 
 default allow := false
 
-allow {
+allow if {
     input.identty = "foo"
 }
 
-allow {
+allow if {
     input.path = "foo"
 }`
 
@@ -9250,7 +10552,9 @@ allow {
 
 			for i, module := range tc.modules {
 				mod, err := ParseModuleWithOpts(fmt.Sprintf("test%d.rego", i+1), module, ParserOptions{
-					ProcessAnnotation: true,
+					ProcessAnnotation:  true,
+					AllFutureKeywords:  true,
+					unreleasedKeywords: true,
 				})
 				if err != nil {
 					t.Fatal(err)
@@ -9264,14 +10568,14 @@ allow {
 				}
 			}
 
-			errors := NewCompiler().WithSchemas(schemaSet).PassesTypeCheckRules(elems)
+			errs := NewCompiler().WithSchemas(schemaSet).PassesTypeCheckRules(elems)
 
-			if len(errors) > 0 {
+			if len(errs) > 0 {
 				if len(tc.errs) == 0 {
-					t.Fatalf("Unexpected error: %v", errors)
+					t.Fatalf("Unexpected error: %v", errs)
 				}
 
-				result := compilerErrsToStringSlice(errors)
+				result := compilerErrsToStringSlice(errs)
 
 				if len(result) != len(tc.errs) {
 					t.Fatalf("Expected %d:\n%v\nBut got %d:\n%v", len(tc.errs), strings.Join(tc.errs, "\n"), len(result), strings.Join(result, "\n"))
@@ -9489,7 +10793,7 @@ func TestCompilerWithRecursiveSchema(t *testing.T) {
 # - input: schema.input
 package opa.recursion
 
-deny {
+deny if {
 	input.Something.Y.X.Name == "Something"
 }
 `
@@ -9503,7 +10807,11 @@ deny {
 	schemaSet.Put(MustParseRef("schema.input"), schema)
 	c.WithSchemas(schemaSet)
 
-	m := MustParseModuleWithOpts(exampleModule, ParserOptions{ProcessAnnotation: true})
+	m := MustParseModuleWithOpts(exampleModule, ParserOptions{
+		ProcessAnnotation:  true,
+		AllFutureKeywords:  true,
+		unreleasedKeywords: true,
+	})
 	c.Compile(map[string]*Module{"testMod": m})
 	if c.Failed() {
 		t.Errorf("Expected compilation to succeed, but got errors: %v", c.Errors)
@@ -9548,7 +10856,7 @@ func TestCompilerWithRecursiveSchemaAndInvalidSource(t *testing.T) {
 # - input: schema.input
 package opa.recursion
 
-deny {
+deny if {
 	input.Something.Y.X.ThisDoesNotExist == "Something"
 }
 `
@@ -9563,7 +10871,11 @@ deny {
 	schemaSet.Put(MustParseRef("schema.input"), schema)
 	c.WithSchemas(schemaSet)
 
-	m := MustParseModuleWithOpts(exampleModule, ParserOptions{ProcessAnnotation: true})
+	m := MustParseModuleWithOpts(exampleModule, ParserOptions{
+		ProcessAnnotation:  true,
+		AllFutureKeywords:  true,
+		unreleasedKeywords: true,
+	})
 	c.Compile(map[string]*Module{"testMod": m})
 	if !c.Failed() {
 		t.Errorf("Expected compilation to fail, but it succeeded")
@@ -9583,6 +10895,20 @@ func modules(ms ...string) []*Module {
 		}
 	}
 	return mods
+}
+
+// FIXME(v1-test-refactor): In OPA 1.0, a call to here can be replaced with a call to MustParseModule.
+func module(raw string, opts ...func(ParserOptions) ParserOptions) *Module {
+	popts := ParserOptions{
+		AllFutureKeywords:  true,
+		unreleasedKeywords: true,
+	}
+
+	for _, opt := range opts {
+		popts = opt(popts)
+	}
+
+	return MustParseModuleWithOpts(raw, popts)
 }
 
 func TestCompilerWithRecursiveSchemaAvoidRace(t *testing.T) {
@@ -9673,7 +10999,7 @@ func TestCompilerWithRecursiveSchemaAvoidRace(t *testing.T) {
 #  - input: schema.input
 package race.condition
 
-deny {
+deny if {
 	queue := input.aws.sqs.queues[_]
 	policy := queue.policies[_]
 	doc := json.unmarshal(policy.document.value)
@@ -9692,9 +11018,168 @@ deny {
 	schemaSet.Put(MustParseRef("schema.input"), schema)
 	c.WithSchemas(schemaSet)
 
-	m := MustParseModuleWithOpts(exampleModule, ParserOptions{ProcessAnnotation: true})
+	m := MustParseModuleWithOpts(exampleModule, ParserOptions{
+		ProcessAnnotation:  true,
+		AllFutureKeywords:  true,
+		unreleasedKeywords: true,
+	})
 	c.Compile(map[string]*Module{"testMod": m})
 	if c.Failed() {
 		t.Fatal(c.Errors)
+	}
+}
+
+func TestCompilerRewriteTestRulesForTracing(t *testing.T) {
+	tests := []struct {
+		note    string
+		rewrite bool
+		module  string
+		exp     string
+	}{
+		{
+			note: "ref comparison, no rewrite",
+			module: `package test
+
+a := 1
+b := 2
+
+test_something if {
+	a == b
+}`,
+			exp: `package test
+        
+a := 1 if { true }
+b := 2 if { true }
+
+test_something = true if { 
+	data.test.a = data.test.b 
+}`,
+		},
+		{
+			note:    "ref comparison, rewrite",
+			rewrite: true,
+			module: `package test
+
+a := 1
+b := 2
+
+test_something if {
+	a == b
+}`,
+			// When the test fails on '__local0__ = __local1__', the values for 'a' and 'b' are captured in local bindings,
+			// accessible by the tracer.
+			exp: `package test
+        
+a := 1 if { true }
+b := 2 if { true }
+
+test_something = true if { 
+	__local0__ = data.test.a
+	__local1__ = data.test.b
+	__local0__ = __local1__
+}`,
+		},
+		{
+			note:    "ref comparison, not-stmt, rewrite",
+			rewrite: true,
+			module: `package test
+
+a := 1
+b := 2
+
+test_something if {
+	not a == b
+}`,
+			// We don't break out local vars from a not-stmt, as that would change the semantics of the rule.
+			exp: `package test
+
+a := 1 if { true }
+b := 2 if { true }
+
+test_something = true if { 
+	not data.test.a = data.test.b
+}`,
+		},
+		{
+			note: "ref comparison, inside every-stmt, no rewrite",
+			module: `package test
+
+a := 1
+b := 2
+l := [1, 2, 3]
+
+test_something if {
+	every x in l {
+		a < b + x
+	}
+}`,
+			exp: `package test
+
+a := 1 if { true }
+b := 2 if { true }
+l := [1, 2, 3] if { true }
+
+test_something = true if { 
+	__local2__ = data.test.l
+	every __local0__, __local1__ in __local2__ { 
+		__local4__ = data.test.b
+		plus(__local4__, __local1__, __local3__)
+		__local5__ = data.test.a
+		lt(__local5__, __local3__) 
+	} 
+}`,
+		},
+		{
+			note:    "ref comparison, inside every-stmt, rewrite",
+			rewrite: true,
+			module: `package test
+
+a := 1
+b := 2
+l := [1, 2, 3]
+
+test_something if {
+	every x in l {
+		a < b + x
+	}
+}`,
+			// When tests contain an 'every' statement, we're interested in the circumstances that made the every fail,
+			// so it's body is rewritten.
+			exp: `package test
+        
+a := 1 if { true }
+b := 2 if { true }
+l := [1, 2, 3] if { true }
+
+test_something = true if { 
+	__local2__ = data.test.l; 
+	every __local0__, __local1__ in __local2__ { 
+		__local4__ = data.test.b
+		plus(__local4__, __local1__, __local3__)
+		__local5__ = data.test.a
+		lt(__local5__, __local3__) 
+	} 
+}`,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.note, func(t *testing.T) {
+			ms := map[string]string{
+				"test.rego": tc.module,
+			}
+			c := getCompilerWithParsedModules(ms).
+				WithRewriteTestRules(tc.rewrite)
+
+			compileStages(c, c.rewriteTestRuleEqualities)
+			assertNotFailed(t, c)
+
+			result := c.Modules["test.rego"]
+			exp := module(tc.exp)
+			exp.Imports = nil // We strip the imports since the compiler will too
+			if result.Compare(exp) != 0 {
+				t.Fatalf("\nExpected:\n\n%v\n\nGot:\n\n%v", exp, result)
+			}
+		})
 	}
 }

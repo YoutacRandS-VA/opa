@@ -9,28 +9,42 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/binary"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
 	"log"
+	"math"
+	"math/big"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/gorilla/mux"
-	"github.com/open-policy-agent/opa/internal/prometheus"
 
 	"github.com/open-policy-agent/opa/ast"
 	"github.com/open-policy-agent/opa/bundle"
 	"github.com/open-policy-agent/opa/config"
 	"github.com/open-policy-agent/opa/internal/distributedtracing"
+	"github.com/open-policy-agent/opa/internal/prometheus"
 	"github.com/open-policy-agent/opa/logging"
 	"github.com/open-policy-agent/opa/metrics"
 	"github.com/open-policy-agent/opa/plugins"
@@ -624,16 +638,17 @@ func TestUnversionedGetHealthWithPolicyUsingPlugins(t *testing.T) {
 	store := inmem.New()
 	txn := storage.NewTransactionOrDie(ctx, store, storage.WriteParams)
 	healthPolicy := `package system.health
+  import rego.v1
 
   default live = false
 
-  live {
+  live if {
     input.plugin_state.bundle == "OK"
   }
 
   default ready = false
 
-  ready {
+  ready if {
     input.plugins_ready
   }
   `
@@ -682,12 +697,13 @@ func TestUnversionedGetHealthWithPolicyUsingPlugins(t *testing.T) {
 
 func TestDataV0(t *testing.T) {
 	testMod1 := `package test
+	import rego.v1
 
 	p = "hello"
 
 	q = {
 		"foo": [1,2,3,4]
-	} {
+	} if {
 		input.flag = true
 	}
 	`
@@ -839,22 +855,23 @@ func Test405StatusCodev0(t *testing.T) {
 func TestCompileV1(t *testing.T) {
 
 	mod := `package test
+	import rego.v1
 
-	p {
+	p if {
 		input.x = 1
 	}
 
-	q {
+	q if {
 		data.a[i] = input.x
 	}
 
 	default r = true
 
-	r { input.x = 1 }
+	r if { input.x = 1 }
 
-	custom_func(x) { data.a[i] == x }
+	custom_func(x) if { data.a[i] == x }
 
-	s { custom_func(input.x) }
+	s if { custom_func(input.x) }
 	`
 
 	expQuery := func(s string) string {
@@ -919,8 +936,9 @@ func TestCompileV1(t *testing.T) {
 				}`, 200, expQueryAndSupport(
 					`data.partial.test.r = true`,
 					`package partial.test
+					import rego.v1
 
-					r { input.x = 1 }
+					r if { input.x = 1 }
 					default r = true
 					`)},
 			},
@@ -948,8 +966,9 @@ func TestCompileV1(t *testing.T) {
 				}`, 200, expQueryAndSupport(
 					`data.partial.test.s = true`,
 					`package partial.test
-					s { data.partial.test.custom_func(1) }
-					custom_func(__local0__2) { data.a[i2] = __local0__2 }
+					import rego.v1
+					s if { data.partial.test.custom_func(1) }
+					custom_func(__local0__2) if { data.a[i2] = __local0__2 }
 					`)},
 			},
 		},
@@ -1008,8 +1027,9 @@ func TestCompileV1Observability(t *testing.T) {
 		f := newFixtureWithStore(t, disk)
 
 		err = f.v1(http.MethodPut, "/policies/test", `package test
-
-	p { input.x = 1 }`, 200, "")
+	import rego.v1
+	
+	p if { input.x = 1 }`, 200, "")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1103,33 +1123,37 @@ func TestDataV1Redirection(t *testing.T) {
 func TestDataV1(t *testing.T) {
 	testMod1 := `package testmod
 
+import rego.v1
 import input.req1
 import input.req2 as reqx
 import input.req3.attr1
 
-p[x] { q[x]; not r[x] }
-q[x] { data.x.y[i] = x }
-r[x] { data.x.z[i] = x }
-g = true { req1.a[0] = 1; reqx.b[i] = 1 }
-h = true { attr1[i] > 1 }
-gt1 = true { req1 > 1 }
-arr = [1, 2, 3, 4] { true }
-undef = true { false }`
+p contains x if { q[x]; not r[x] }
+q contains x if { data.x.y[i] = x }
+r contains x if { data.x.z[i] = x }
+g = true if { req1.a[0] = 1; reqx.b[i] = 1 }
+h = true if { attr1[i] > 1 }
+gt1 = true if { req1 > 1 }
+arr = [1, 2, 3, 4] if { true }
+undef = true if { false }`
 
 	testMod2 := `package testmod
+import rego.v1
 
-p = [1, 2, 3, 4] { true }
-q = {"a": 1, "b": 2} { true }`
+p = [1, 2, 3, 4] if { true }
+q = {"a": 1, "b": 2} if { true }`
 
 	testMod4 := `package testmod
+import rego.v1
 
-p = true { true }
-p = false { true }`
+p = true if { true }
+p = false if { true }`
 
 	testMod5 := `package testmod.empty.mod`
 	testMod6 := `package testmod.all.undefined
+import rego.v1
 
-p = true { false }`
+p = true if { false }`
 
 	tests := []struct {
 		note string
@@ -1362,7 +1386,7 @@ p = true { false }`
     		      "location": {
     		        "col": 1,
     		        "file": "test",
-    		        "row": 4
+    		        "row": 5
     		      },
     		      "message": "complete rules must not produce multiple outputs"
     		    }
@@ -1426,10 +1450,11 @@ p = true { false }`
 		{"strict-builtin-errors", []tr{
 			{http.MethodPut, "/policies/test", `
 				package test
+				import rego.v1
 
 				default p = false
 
-				p { 1/0 }
+				p if { 1/0 }
 			`, 200, ""},
 			{http.MethodGet, "/data/test/p", "", 200, `{"result": false}`},
 			{http.MethodGet, "/data/test/p?strict-builtin-errors", "", 500, `{
@@ -1441,8 +1466,8 @@ p = true { false }`
 					"message": "div: divide by zero",
 					"location": {
 					  "file": "test",
-					  "row": 6,
-					  "col": 9
+					  "row": 7,
+					  "col": 12
 					}
 				  }
 				]
@@ -1463,8 +1488,8 @@ p = true { false }`
 					"message": "div: divide by zero",
 					"location": {
 					  "file": "test",
-					  "row": 6,
-					  "col": 9
+					  "row": 7,
+					  "col": 12
 					}
 				  }
 				]
@@ -1610,8 +1635,9 @@ func TestConfigV1(t *testing.T) {
 func TestDataYAML(t *testing.T) {
 
 	testMod1 := `package testmod
+import rego.v1
 import input.req1
-gt1 = true { req1 > 1 }`
+gt1 = true if { req1 > 1 }`
 
 	inputYaml1 := `
 ---
@@ -1670,6 +1696,344 @@ func TestDataPutV1IfNoneMatch(t *testing.T) {
 	}
 }
 
+// Ensure JSON payload is compressed with gzip.
+func mustGZIPPayload(payload []byte) []byte {
+	var compressedPayload bytes.Buffer
+	gz := gzip.NewWriter(&compressedPayload)
+	if _, err := gz.Write(payload); err != nil {
+		panic(fmt.Errorf("Error writing to gzip writer: %w", err))
+	}
+	if err := gz.Close(); err != nil {
+		panic(fmt.Errorf("Error closing gzip writer: %w", err))
+	}
+	return compressedPayload.Bytes()
+}
+
+// generateJSONBenchmarkData returns a map of `k` keys and `v` key/value pairs.
+// Taken from topdown/topdown_bench_test.go
+func generateJSONBenchmarkData(k, v int) map[string]interface{} {
+	// create array of null values that can be iterated over
+	keys := make([]interface{}, k)
+	for i := range keys {
+		keys[i] = nil
+	}
+
+	// create large JSON object value (100,000 entries is about 2MB on disk)
+	values := map[string]interface{}{}
+	for i := 0; i < v; i++ {
+		values[fmt.Sprintf("key%d", i)] = fmt.Sprintf("value%d", i)
+	}
+
+	return map[string]interface{}{
+		"input": map[string]interface{}{
+			"keys":   keys,
+			"values": values,
+		},
+	}
+}
+
+// Ref: https://github.com/open-policy-agent/opa/issues/6804
+func TestDataGetV1CompressedRequestWithAuthorizer(t *testing.T) {
+	tests := []struct {
+		note                  string
+		payload               []byte
+		forcePayloadSizeField uint32 // Size to manually set the payload field for the gzip blob.
+		expRespHTTPStatus     int
+		expErrorMsg           string
+	}{
+		{
+			note:              "empty message",
+			payload:           mustGZIPPayload([]byte{}),
+			expRespHTTPStatus: 401,
+		},
+		{
+			note:              "empty object",
+			payload:           mustGZIPPayload([]byte(`{}`)),
+			expRespHTTPStatus: 401,
+		},
+		{
+			note:              "basic authz - fail",
+			payload:           mustGZIPPayload([]byte(`{"user": "bob"}`)),
+			expRespHTTPStatus: 401,
+		},
+		{
+			note:              "basic authz - pass",
+			payload:           mustGZIPPayload([]byte(`{"user": "alice"}`)),
+			expRespHTTPStatus: 200,
+		},
+		{
+			note:                  "basic authz - malicious size field",
+			payload:               mustGZIPPayload([]byte(`{"user": "alice"}`)),
+			expRespHTTPStatus:     400,
+			forcePayloadSizeField: 134217728, // 128 MB
+			expErrorMsg:           "gzip: invalid checksum",
+		},
+		{
+			note:              "basic authz - huge zip",
+			payload:           mustGZIPPayload(util.MustMarshalJSON(generateJSONBenchmarkData(100, 100))),
+			expRespHTTPStatus: 401,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.note, func(t *testing.T) {
+			ctx := context.Background()
+			store := inmem.New()
+			txn := storage.NewTransactionOrDie(ctx, store, storage.WriteParams)
+			authzPolicy := `package system.authz
+
+import rego.v1
+
+default allow := false # Reject requests by default.
+
+allow if {
+	# Logic to authorize request goes here.
+	input.body.user == "alice"
+}
+`
+
+			if err := store.UpsertPolicy(ctx, txn, "test", []byte(authzPolicy)); err != nil {
+				panic(err)
+			}
+
+			if err := store.Commit(ctx, txn); err != nil {
+				panic(err)
+			}
+
+			opts := [](func(*Server)){
+				func(s *Server) {
+					s.WithStore(store)
+				},
+				func(s *Server) {
+					s.WithAuthorization(AuthorizationBasic)
+				},
+			}
+
+			f := newFixtureWithConfig(t, fmt.Sprintf(`{"server":{"decision_logs": %t}}`, true), opts...)
+
+			// Forcibly replace the size trailer field for the gzip blob.
+			// Byte order is little-endian, field is a uint32.
+			if test.forcePayloadSizeField != 0 {
+				binary.LittleEndian.PutUint32(test.payload[len(test.payload)-4:], test.forcePayloadSizeField)
+			}
+
+			// execute the request
+			req := newReqV1(http.MethodPost, "/data/test", string(test.payload))
+			req.Header.Set("Content-Encoding", "gzip")
+			f.reset()
+			f.server.Handler.ServeHTTP(f.recorder, req)
+			if f.recorder.Code != test.expRespHTTPStatus {
+				t.Fatalf("Unexpected HTTP status code, (exp,got): %d, %d", test.expRespHTTPStatus, f.recorder.Code)
+			}
+			if test.expErrorMsg != "" {
+				var serverErr types.ErrorV1
+				if err := json.Unmarshal(f.recorder.Body.Bytes(), &serverErr); err != nil {
+					t.Fatalf("Could not deserialize error message: %s", err.Error())
+				}
+				if serverErr.Message != test.expErrorMsg {
+					t.Fatalf("Expected error message to have message '%s', got message: '%s'", test.expErrorMsg, serverErr.Message)
+				}
+			}
+		})
+	}
+}
+
+// Tests to ensure the body size limits work, for compressed requests.
+func TestDataPostV1CompressedDecodingLimits(t *testing.T) {
+	defaultMaxLen := int64(1024)
+	defaultGzipMaxLen := int64(1024)
+
+	tests := []struct {
+		note                  string
+		wantGzip              bool
+		wantChunkedEncoding   bool
+		payload               []byte
+		forceContentLen       int64  // Size to manually set the Content-Length header to.
+		forcePayloadSizeField uint32 // Size to manually set the payload field for the gzip blob.
+		expRespHTTPStatus     int
+		expWarningMsg         string
+		expErrorMsg           string
+		maxLen                int64
+		gzipMaxLen            int64
+	}{
+		{
+			note:              "empty message",
+			payload:           []byte{},
+			expRespHTTPStatus: 200,
+			expWarningMsg:     "'input' key missing from the request",
+		},
+		{
+			note:              "empty message, gzip",
+			wantGzip:          true,
+			payload:           mustGZIPPayload([]byte{}),
+			expRespHTTPStatus: 200,
+			expWarningMsg:     "'input' key missing from the request",
+		},
+		{
+			note:              "empty message, malicious Content-Length",
+			payload:           []byte{},
+			forceContentLen:   2048, // Server should ignore this header entirely.
+			expRespHTTPStatus: 400,
+			expErrorMsg:       "request body too large",
+		},
+		{
+			note:              "empty message, gzip, malicious Content-Length",
+			wantGzip:          true,
+			payload:           mustGZIPPayload([]byte{}),
+			forceContentLen:   2048, // Server should ignore this header entirely.
+			expRespHTTPStatus: 400,
+			expErrorMsg:       "request body too large",
+		},
+		{
+			note:                  "basic - malicious size field, expect reject on gzip payload length",
+			wantGzip:              true,
+			payload:               mustGZIPPayload([]byte(`{"input": {"user": "alice"}}`)),
+			expRespHTTPStatus:     400,
+			forcePayloadSizeField: 134217728, // 128 MB
+			expErrorMsg:           "gzip payload too large",
+			gzipMaxLen:            1024,
+		},
+		{
+			note:                  "basic - malicious size field, expect reject on gzip payload length, chunked encoding",
+			wantGzip:              true,
+			wantChunkedEncoding:   true,
+			payload:               mustGZIPPayload([]byte(`{"input": {"user": "alice"}}`)),
+			expRespHTTPStatus:     400,
+			forcePayloadSizeField: 134217728, // 128 MB
+			expErrorMsg:           "gzip payload too large",
+			gzipMaxLen:            1024,
+		},
+		{
+			note:              "basic, large payload",
+			payload:           util.MustMarshalJSON(generateJSONBenchmarkData(100, 100)),
+			expRespHTTPStatus: 200,
+			maxLen:            134217728,
+		},
+		{
+			note:              "basic, large payload, expect reject on Content-Length",
+			payload:           util.MustMarshalJSON(generateJSONBenchmarkData(100, 100)),
+			expRespHTTPStatus: 400,
+			maxLen:            512,
+			expErrorMsg:       "request body too large",
+		},
+		{
+			note:                "basic, large payload, expect reject on Content-Length, chunked encoding",
+			wantChunkedEncoding: true,
+			payload:             util.MustMarshalJSON(generateJSONBenchmarkData(100, 100)),
+			expRespHTTPStatus:   200,
+			maxLen:              134217728,
+		},
+		{
+			note:              "basic, gzip, large payload",
+			wantGzip:          true,
+			payload:           mustGZIPPayload(util.MustMarshalJSON(generateJSONBenchmarkData(100, 100))),
+			expRespHTTPStatus: 200,
+			maxLen:            1024,
+			gzipMaxLen:        134217728,
+		},
+		{
+			note:              "basic, gzip, large payload, expect reject on gzip payload length",
+			wantGzip:          true,
+			payload:           mustGZIPPayload(util.MustMarshalJSON(generateJSONBenchmarkData(100, 100))),
+			expRespHTTPStatus: 400,
+			maxLen:            1024,
+			gzipMaxLen:        10,
+			expErrorMsg:       "gzip payload too large",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.note, func(t *testing.T) {
+			ctx := context.Background()
+			store := inmem.New()
+			txn := storage.NewTransactionOrDie(ctx, store, storage.WriteParams)
+			examplePolicy := `package example.authz
+
+import rego.v1
+
+default allow := false # Reject requests by default.
+
+allow if {
+	# Logic to authorize request goes here.
+	input.body.user == "alice"
+}
+`
+
+			if err := store.UpsertPolicy(ctx, txn, "test", []byte(examplePolicy)); err != nil {
+				panic(err)
+			}
+
+			if err := store.Commit(ctx, txn); err != nil {
+				panic(err)
+			}
+
+			opts := [](func(*Server)){
+				func(s *Server) {
+					s.WithStore(store)
+				},
+			}
+
+			// Set defaults for max_length configs, if not specified in the test case.
+			if test.maxLen == 0 {
+				test.maxLen = defaultMaxLen
+			}
+			if test.gzipMaxLen == 0 {
+				test.gzipMaxLen = defaultGzipMaxLen
+			}
+
+			f := newFixtureWithConfig(t, fmt.Sprintf(`{"server":{"decision_logs": %t, "decoding":{"max_length": %d, "gzip": {"max_length": %d}}}}`, true, test.maxLen, test.gzipMaxLen), opts...)
+
+			// Forcibly replace the size trailer field for the gzip blob.
+			// Byte order is little-endian, field is a uint32.
+			if test.forcePayloadSizeField != 0 {
+				binary.LittleEndian.PutUint32(test.payload[len(test.payload)-4:], test.forcePayloadSizeField)
+			}
+
+			// execute the request
+			req := newReqV1(http.MethodPost, "/data/test", string(test.payload))
+			if test.wantGzip {
+				req.Header.Set("Content-Encoding", "gzip")
+			}
+			if test.wantChunkedEncoding {
+				req.ContentLength = -1
+				req.TransferEncoding = []string{"chunked"}
+				req.Header.Set("Transfer-Encoding", "chunked")
+			}
+			if test.forceContentLen > 0 {
+				req.ContentLength = test.forceContentLen
+				req.Header.Set("Content-Length", strconv.FormatInt(test.forceContentLen, 10))
+			}
+			f.reset()
+			f.server.Handler.ServeHTTP(f.recorder, req)
+			if f.recorder.Code != test.expRespHTTPStatus {
+				t.Fatalf("Unexpected HTTP status code, (exp,got): %d, %d, response body: %s", test.expRespHTTPStatus, f.recorder.Code, f.recorder.Body.Bytes())
+			}
+			if test.expErrorMsg != "" {
+				var serverErr types.ErrorV1
+				if err := json.Unmarshal(f.recorder.Body.Bytes(), &serverErr); err != nil {
+					t.Fatalf("Could not deserialize error message: %s, message was: %s", err.Error(), f.recorder.Body.Bytes())
+				}
+				if !strings.Contains(serverErr.Message, test.expErrorMsg) {
+					t.Fatalf("Expected error message to have message '%s', got message: '%s'", test.expErrorMsg, serverErr.Message)
+				}
+			} else {
+				var resp types.DataResponseV1
+				if err := json.Unmarshal(f.recorder.Body.Bytes(), &resp); err != nil {
+					t.Fatalf("Could not deserialize response: %s, message was: %s", err.Error(), f.recorder.Body.Bytes())
+				}
+				if test.expWarningMsg != "" {
+					if !strings.Contains(resp.Warning.Message, test.expWarningMsg) {
+						t.Fatalf("Expected warning message to have message '%s', got message: '%s'", test.expWarningMsg, resp.Warning.Message)
+					}
+				} else if resp.Warning != nil {
+					// Error on unexpected warnings. Something is wrong.
+					t.Fatalf("Unexpected warning: code: %s, message: %s", resp.Warning.Code, resp.Warning.Message)
+				}
+			}
+		})
+	}
+}
+
 func TestDataPostV0CompressedResponse(t *testing.T) {
 	tests := []struct {
 		gzipMinLength      int
@@ -1689,8 +2053,9 @@ func TestDataPostV0CompressedResponse(t *testing.T) {
 		f := newFixtureWithConfig(t, fmt.Sprintf(`{"server":{"encoding":{"gzip":{"min_length": %d}}}}`, test.gzipMinLength))
 		// create the policy
 		err := f.v1(http.MethodPut, "/policies/test", `package opa.examples
+import rego.v1
 import input.example.flag
-allow_request { flag == true }
+allow_request if { flag == true }
 `, 200, "")
 		if err != nil {
 			t.Fatal(err)
@@ -1754,8 +2119,9 @@ func TestDataPostV1CompressedResponse(t *testing.T) {
 		f := newFixtureWithConfig(t, fmt.Sprintf(`{"server":{"encoding":{"gzip":{"min_length": %d}}}}`, test.gzipMinLength))
 		// create the policy
 		err := f.v1(http.MethodPut, "/policies/test", `package test
+import rego.v1
 default hello := false
-hello {
+hello if {
 	input.message == "world"
 }
 `, 200, "")
@@ -1827,22 +2193,23 @@ func TestCompileV1CompressedResponse(t *testing.T) {
 
 		// create the policy
 		mod := `package test
+	import rego.v1
 
-	p {
+	p if {
 		input.x = 1
 	}
 
-	q {
+	q if {
 		data.a[i] = input.x
 	}
 
 	default r = true
 
-	r { input.x = 1 }
+	r if { input.x = 1 }
 
-	custom_func(x) { data.a[i] == x }
+	custom_func(x) if { data.a[i] == x }
 
-	s { custom_func(input.x) }
+	s if { custom_func(input.x) }
 	`
 		err := f.v1(http.MethodPut, "/policies/test", mod, 200, "")
 		if err != nil {
@@ -1899,8 +2266,9 @@ func TestDataPostV0CompressedRequest(t *testing.T) {
 	f := newFixture(t)
 	// create the policy
 	err := f.v1(http.MethodPut, "/policies/test", `package opa.examples
+import rego.v1
 import input.example.flag
-allow_request { flag == true }
+allow_request if { flag == true }
 `, 200, "")
 	if err != nil {
 		t.Fatal(err)
@@ -1924,8 +2292,9 @@ func TestDataPostV1CompressedRequest(t *testing.T) {
 	f := newFixture(t)
 	// create the policy
 	err := f.v1(http.MethodPut, "/policies/test", `package test
+import rego.v1
 default hello := false
-hello {
+hello if {
 	input.message == "world"
 }
 `, 200, "")
@@ -1960,22 +2329,23 @@ func TestCompileV1CompressedRequest(t *testing.T) {
 	f := newFixture(t)
 	// create the policy
 	mod := `package test
+	import rego.v1
 
-	p {
+	p if {
 		input.x = 1
 	}
 
-	q {
+	q if {
 		data.a[i] = input.x
 	}
 
 	default r = true
 
-	r { input.x = 1 }
+	r if { input.x = 1 }
 
-	custom_func(x) { data.a[i] == x }
+	custom_func(x) if { data.a[i] == x }
 
-	s { custom_func(input.x) }
+	s if { custom_func(input.x) }
 	`
 	err := f.v1(http.MethodPut, "/policies/test", mod, 200, "")
 	if err != nil {
@@ -2360,8 +2730,9 @@ func TestDataPostWithActiveStoreWriteTxn(t *testing.T) {
 	f := newFixture(t)
 
 	err := f.v1(http.MethodPut, "/policies/test", `package test
+import rego.v1
 
-p = [1, 2, 3, 4] { true }`, 200, "")
+p = [1, 2, 3, 4] if { true }`, 200, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2396,8 +2767,9 @@ func TestDataPostExplain(t *testing.T) {
 	f := newFixture(t)
 
 	err := f.v1(http.MethodPut, "/policies/test", `package test
+import rego.v1
 
-p = [1, 2, 3, 4] { true }`, 200, "")
+p = [1, 2, 3, 4] if { true }`, 200, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2436,7 +2808,9 @@ func TestDataPostExplainNotes(t *testing.T) {
 
 	err := f.v1(http.MethodPut, "/policies/test", `
 		package test
-		p {
+		import rego.v1
+		
+		p if {
 			data.a[i] = x; x > 1
 			trace(sprintf("found x = %d", [x]))
 		}`, 200, "")
@@ -3169,26 +3543,34 @@ func TestStatusV1(t *testing.T) {
 
 	f.server.manager.Register(pluginStatus.Name, bs)
 
-	req = newReqV1(http.MethodGet, "/status", "")
-	f.reset()
-	f.server.Handler.ServeHTTP(f.recorder, req)
-	if f.recorder.Result().StatusCode != http.StatusOK {
-		t.Fatal("expected ok")
-	}
+	// Fetch the status info, wait for status plugin to be ok
+	t0 := time.Now()
+	ok := false
+	for !ok && time.Since(t0) < time.Second {
+		req = newReqV1(http.MethodGet, "/status", "")
+		f.reset()
+		f.server.Handler.ServeHTTP(f.recorder, req)
+		if f.recorder.Result().StatusCode != http.StatusOK {
+			t.Fatal("expected ok")
+		}
 
-	var resp1 struct {
-		Result struct {
-			Plugins struct {
-				Status struct {
-					State string
+		var resp1 struct {
+			Result struct {
+				Plugins struct {
+					Status struct {
+						State string
+					}
 				}
 			}
 		}
-	}
-	if err := util.NewJSONDecoder(f.recorder.Body).Decode(&resp1); err != nil {
-		t.Fatal(err)
-	} else if resp1.Result.Plugins.Status.State != "OK" {
-		t.Fatal("expected plugin state for status to be 'OK' but got:", resp1)
+		if err := util.NewJSONDecoder(f.recorder.Body).Decode(&resp1); err != nil {
+			t.Fatal(err)
+		}
+		if resp1.Result.Plugins.Status.State == "OK" {
+			ok = true
+		} else {
+			t.Log("expected plugin state for status to be 'OK' but got:", resp1)
+		}
 	}
 
 	// Expect HTTP 200 and updated status after bundle update occurs
@@ -3237,8 +3619,10 @@ func TestStatusV1MetricsWithSystemAuthzPolicy(t *testing.T) {
 	store := inmem.New()
 	txn := storage.NewTransactionOrDie(ctx, store, storage.WriteParams)
 	authzPolicy := `package system.authz
+	import rego.v1
+	
 	default allow = false
-	allow {
+	allow if {
 		input.path = ["v1", "status"]
 	}`
 
@@ -3281,27 +3665,34 @@ func TestStatusV1MetricsWithSystemAuthzPolicy(t *testing.T) {
 	}
 	f.server.manager.Register(pluginStatus.Name, bs)
 
-	// Fetch the status info
-	req = newReqV1(http.MethodGet, "/status", "")
-	f.reset()
-	f.server.Handler.ServeHTTP(f.recorder, req)
-	if f.recorder.Result().StatusCode != http.StatusOK {
-		t.Fatal("expected ok")
-	}
+	// Fetch the status info, wait for status plugin to be ok
+	t0 := time.Now()
+	ok := false
+	for !ok && time.Since(t0) < time.Second {
+		req = newReqV1(http.MethodGet, "/status", "")
+		f.reset()
+		f.server.Handler.ServeHTTP(f.recorder, req)
+		if f.recorder.Result().StatusCode != http.StatusOK {
+			t.Fatal("expected ok")
+		}
 
-	var resp1 struct {
-		Result struct {
-			Plugins struct {
-				Status struct {
-					State string
+		var resp1 struct {
+			Result struct {
+				Plugins struct {
+					Status struct {
+						State string
+					}
 				}
 			}
 		}
-	}
-	if err := util.NewJSONDecoder(f.recorder.Body).Decode(&resp1); err != nil {
-		t.Fatal(err)
-	} else if resp1.Result.Plugins.Status.State != "OK" {
-		t.Fatal("expected plugin state for status to be 'OK' but got:", resp1)
+		if err := util.NewJSONDecoder(f.recorder.Body).Decode(&resp1); err != nil {
+			t.Fatal(err)
+		}
+		if resp1.Result.Plugins.Status.State == "OK" {
+			ok = true
+		} else {
+			t.Log("expected plugin state for status to be 'OK' but got:", resp1)
+		}
 	}
 
 	// Make requests that should get denied
@@ -3464,6 +3855,50 @@ func TestDecisionIDs(t *testing.T) {
 	}
 }
 
+func TestDecisionLoggingWithHTTPRequestContext(t *testing.T) {
+	f := newFixture(t)
+
+	decisions := []*Info{}
+
+	var nextID int
+
+	f.server = f.server.WithDecisionIDFactory(func() string {
+		nextID++
+		return fmt.Sprint(nextID)
+	}).WithDecisionLoggerWithErr(func(_ context.Context, info *Info) error {
+		decisions = append(decisions, info)
+		return nil
+	})
+
+	req := newReqV1("POST", "/data/nonexistent", `{"input": {"foo": 1}}`)
+	req.Header.Set("foo", "bar")
+	req.Header.Set("foo2", "bar2")
+	req.Header.Add("foo2", "bar3")
+
+	httpRctx := logging.HTTPRequestContext{Header: req.Header.Clone()}
+
+	req = req.WithContext(logging.WithHTTPRequestContext(req.Context(), &httpRctx))
+
+	if err := f.executeRequest(req, http.StatusOK, `{"decision_id": "1"}`); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(decisions) != 1 {
+		t.Fatalf("Expected exactly 1 decision but got: %d", len(decisions))
+	}
+
+	expHeaders := http.Header{}
+	expHeaders.Set("foo", "bar")
+	expHeaders.Add("foo2", "bar2")
+	expHeaders.Add("foo2", "bar3")
+
+	exp := logging.HTTPRequestContext{Header: expHeaders}
+
+	if !reflect.DeepEqual(decisions[0].HTTPRequestContext, exp) {
+		t.Fatalf("Expected HTTP request context %v but got: %v", exp, decisions[0].HTTPRequestContext)
+	}
+}
+
 func TestDecisionLogging(t *testing.T) {
 	f := newFixture(t)
 
@@ -3545,13 +3980,16 @@ func TestDecisionLogging(t *testing.T) {
 			method: "PUT",
 			path:   "/policies/test2",
 			body: `package foo
-			p { {k: v | k = ["a", "a"][_]; v = [1, 2][_]} }`,
+			import rego.v1
+			p if { {k: v | k = ["a", "a"][_]; v = [1, 2][_]} }`,
 			response: `{}`,
 		},
 		{
-			method:   "PUT",
-			path:     "/policies/test",
-			body:     "package system\nmain { data.foo.p }",
+			method: "PUT",
+			path:   "/policies/test",
+			body: `package system
+			import rego.v1
+			main if { data.foo.p }`,
 			response: `{}`,
 		},
 		{
@@ -3799,8 +4237,9 @@ func TestUnversionedPost(t *testing.T) {
 
 	module := `
 	package system.main
+	import rego.v1
 
-	agg = x {
+	agg = x if {
 		sum(input.foo.bar, x)
 	}
 	`
@@ -3819,8 +4258,9 @@ func TestUnversionedPost(t *testing.T) {
 
 	module = `
 	package system
+	import rego.v1
 
-	main {
+	main if {
 		input.foo == "bar"
 	}
 	`
@@ -3845,6 +4285,47 @@ func TestUnversionedPost(t *testing.T) {
 `
 	if f.recorder.Body.String() != expectedBody {
 		t.Errorf("Expected %s got %s", expectedBody, f.recorder.Body.String())
+	}
+
+	// update the default decision path
+	s := "http/authz"
+	f.server.manager.Config.DefaultDecision = &s
+
+	f.reset()
+	f.server.Handler.ServeHTTP(f.recorder, post())
+
+	if f.recorder.Code != 404 {
+		t.Fatalf("Expected not found before policy added but got %v", f.recorder)
+	}
+
+	expectedBody = `{
+  "code": "undefined_document",
+  "message": "document missing: data.http.authz"
+}
+`
+	if f.recorder.Body.String() != expectedBody {
+		t.Fatalf("Expected %s got %s", expectedBody, f.recorder.Body.String())
+	}
+
+	module = `
+	package http.authz
+	import rego.v1
+
+	agg = x if {
+		sum(input.foo.bar, x)
+	}
+	`
+
+	if err := f.v1("PUT", "/policies/test", module, 200, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	f.reset()
+	f.server.Handler.ServeHTTP(f.recorder, post())
+
+	expected = "{\"agg\":6}\n"
+	if f.recorder.Code != 200 || f.recorder.Body.String() != expected {
+		t.Fatalf(`Expected HTTP 200 / %v but got: %v`, expected, f.recorder)
 	}
 }
 
@@ -3886,12 +4367,13 @@ func TestAuthorization(t *testing.T) {
 	txn := storage.NewTransactionOrDie(ctx, store, storage.WriteParams)
 
 	authzPolicy := `package system.authz
-
+		
+		import rego.v1
 		import input.identity
 
 		default allow = false
 
-		allow {
+		allow if {
 			identity = "bob"
 		}
 		`
@@ -3938,12 +4420,13 @@ func TestAuthorization(t *testing.T) {
 	// Reverse the policy.
 	update := identifier.SetIdentity(newReqV1(http.MethodPut, "/policies/test", `
 		package system.authz
-
+		
+		import rego.v1
 		import input.identity
 
 		default allow = false
 
-		allow {
+		allow if {
 			identity = "alice"
 		}
 	`), "bob")
@@ -4011,10 +4494,11 @@ func TestAuthorizationUsesInterQueryCache(t *testing.T) {
 	}))
 
 	authzPolicy := fmt.Sprintf(`package system.authz
+import rego.v1
 
 default allow := false
 
-allow {
+allow if {
 	resp := http.send({
 		"method": "GET", "url": "%[1]s/foo",
 		"force_cache": true,
@@ -4092,7 +4576,7 @@ func TestServerUsesAuthorizerParsedBody(t *testing.T) {
 	})
 
 	// Check that v1 reader function behaves correctly.
-	inp, err := readInputPostV1(req.WithContext(ctx))
+	inp, goInp, err := readInputPostV1(req.WithContext(ctx))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -4103,18 +4587,26 @@ func TestServerUsesAuthorizerParsedBody(t *testing.T) {
 		t.Fatalf("expected %v but got %v", exp, inp)
 	}
 
+	if exp.Value.Compare(ast.MustInterfaceToValue(*goInp)) != 0 {
+		t.Fatalf("expected %v but got %v", exp, *goInp)
+	}
+
 	// Check that v0 reader function behaves correctly.
 	ctx = authorizer.SetBodyOnContext(req.Context(), map[string]interface{}{
 		"foo": "good",
 	})
 
-	inp, err = readInputV0(req.WithContext(ctx))
+	inp, goInp, err = readInputV0(req.WithContext(ctx))
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	if exp.Value.Compare(inp) != 0 {
 		t.Fatalf("expected %v but got %v", exp, inp)
+	}
+
+	if exp.Value.Compare(ast.MustInterfaceToValue(*goInp)) != 0 {
+		t.Fatalf("expected %v but got %v", exp, *goInp)
 	}
 }
 
@@ -4184,23 +4676,23 @@ type queryBindingErrStore struct {
 	storage.PolicyNotSupported
 }
 
-func (s *queryBindingErrStore) Read(ctx context.Context, txn storage.Transaction, path storage.Path) (interface{}, error) {
+func (s *queryBindingErrStore) Read(_ context.Context, _ storage.Transaction, _ storage.Path) (interface{}, error) {
 	return nil, fmt.Errorf("expected error")
 }
 
-func (*queryBindingErrStore) ListPolicies(ctx context.Context, txn storage.Transaction) ([]string, error) {
+func (*queryBindingErrStore) ListPolicies(_ context.Context, _ storage.Transaction) ([]string, error) {
 	return nil, nil
 }
 
-func (queryBindingErrStore) NewTransaction(ctx context.Context, params ...storage.TransactionParams) (storage.Transaction, error) {
+func (queryBindingErrStore) NewTransaction(_ context.Context, _ ...storage.TransactionParams) (storage.Transaction, error) {
 	return nil, nil
 }
 
-func (queryBindingErrStore) Commit(ctx context.Context, txn storage.Transaction) error {
+func (queryBindingErrStore) Commit(_ context.Context, _ storage.Transaction) error {
 	return nil
 }
 
-func (queryBindingErrStore) Abort(ctx context.Context, txn storage.Transaction) {
+func (queryBindingErrStore) Abort(_ context.Context, _ storage.Transaction) {
 
 }
 
@@ -4258,11 +4750,12 @@ func TestQueryBindingIterationError(t *testing.T) {
 const (
 	testMod = `package a.b.c
 
+import rego.v1
 import data.x.y as z
 import data.p
 
-q[x] { p[x]; not r[x] }
-r[x] { z[x] = 4 }`
+q contains x if { p[x]; not r[x] }
+r contains x if { z[x] = 4 }`
 )
 
 type fixture struct {
@@ -4761,7 +5254,7 @@ func TestMixedAddrTypes(t *testing.T) {
 
 func TestCustomRoute(t *testing.T) {
 	router := mux.NewRouter()
-	router.HandleFunc("/customEndpoint", func(w http.ResponseWriter, r *http.Request) {
+	router.HandleFunc("/customEndpoint", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(`{"myCustomResponse": true}`)) // ignore error
 	})
 	f := newFixture(t, func(server *Server) {
@@ -4830,10 +5323,868 @@ func TestDistributedTracingEnabled(t *testing.T) {
 		}}`)
 
 	ctx := context.Background()
-	_, _, err := distributedtracing.Init(ctx, c, "foo")
+	_, _, _, err := distributedtracing.Init(ctx, c, "foo")
 	if err != nil {
 		t.Fatalf("Unexpected error initializing trace exporter %v", err)
 	}
+}
+
+func TestDistributedTracingResourceAttributes(t *testing.T) {
+	c := []byte(`{"distributed_tracing": {
+		"type": "grpc",
+		"service_name": "my-service",
+		"resource": {
+			"service_namespace": "my-namespace",
+			"service_version": "1.0",
+			"service_instance_id": "1"
+		}
+		}}`)
+
+	ctx := context.Background()
+	_, traceProvider, resource, err := distributedtracing.Init(ctx, c, "foo")
+	if err != nil {
+		t.Fatalf("Unexpected error initializing trace exporter %v", err)
+	}
+	if traceProvider == nil {
+		t.Fatalf("Tracer provider was not initialized")
+	}
+	if resource == nil {
+		t.Fatalf("Resource was not initialized")
+	}
+	if len(resource.Attributes()) != 4 {
+		t.Fatalf("Unexpected resource attributes count. Expected: %v, Got: %v", 4, len(resource.Attributes()))
+	}
+}
+
+func TestCertPoolReloading(t *testing.T) {
+
+	ctx := context.Background()
+
+	tempDir := t.TempDir()
+
+	serverCertPath := filepath.Join(tempDir, "serverCert.pem")
+	serverCertKeyPath := filepath.Join(tempDir, "serverCertKey.pem")
+	clientCertPath := filepath.Join(tempDir, "clientCert.pem")
+	clientCertKeyPath := filepath.Join(tempDir, "clientCertKey.pem")
+	caCertPath := filepath.Join(tempDir, "ca.pem")
+
+	san := net.ParseIP("127.0.0.1")
+
+	// create the CA cert used in the cert pool and for signing server certs
+	caKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	caSerial, err := rand.Int(rand.Reader, big.NewInt(math.MaxInt64))
+	if err != nil {
+		t.Fatal(err)
+	}
+	caSubj := pkix.Name{
+		CommonName:   "CA",
+		SerialNumber: caSerial.String(),
+	}
+	caTemplate := &x509.Certificate{
+		BasicConstraintsValid: true,
+		SignatureAlgorithm:    x509.ECDSAWithSHA256,
+		PublicKeyAlgorithm:    x509.ECDSA,
+		PublicKey:             caKey.Public(),
+		SerialNumber:          caSerial,
+		Issuer:                caSubj,
+		Subject:               caSubj,
+		NotBefore:             time.Now(),
+		NotAfter:              time.Now().Add(100 * time.Hour * 24 * 365),
+		KeyUsage:              x509.KeyUsageCertSign,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth},
+		IsCA:                  true,
+		DNSNames:              nil,
+		EmailAddresses:        nil,
+		IPAddresses:           nil,
+	}
+
+	caCertData, err := x509.CreateCertificate(rand.Reader, caTemplate, caTemplate, caKey.Public(), caKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	caCertPEMEncoded := pem.EncodeToMemory(&pem.Block{
+		Type:  "CERTIFICATE",
+		Bytes: caCertData,
+	})
+
+	// we write an empty file for now
+	err = os.WriteFile(caCertPath, []byte{}, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// create a cert and key for the server to load at startup
+	var serverCert tls.Certificate
+
+	serverCertKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	serverCert.PrivateKey = serverCertKey
+
+	serverCertSerial, err := rand.Int(rand.Reader, big.NewInt(math.MaxInt64))
+	if err != nil {
+		t.Fatal(err)
+	}
+	serverCertTemplate := &x509.Certificate{
+		BasicConstraintsValid: true,
+		SignatureAlgorithm:    x509.ECDSAWithSHA256,
+		PublicKeyAlgorithm:    x509.ECDSA,
+		PublicKey:             serverCertKey.Public(),
+		SerialNumber:          serverCertSerial,
+		Issuer:                caSubj,
+		Subject: pkix.Name{
+			CommonName:   "Server 1",
+			SerialNumber: serverCertSerial.String(),
+		},
+		NotBefore:      time.Now(),
+		NotAfter:       time.Now().Add(99 * time.Hour * 24 * 365),
+		KeyUsage:       x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:    []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		IsCA:           false,
+		DNSNames:       nil,
+		EmailAddresses: nil,
+		IPAddresses:    []net.IP{san},
+	}
+
+	serverCertData, err := x509.CreateCertificate(rand.Reader, serverCertTemplate, caTemplate, serverCertKey.Public(), caKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	serverCertPEMEncoded := pem.EncodeToMemory(&pem.Block{
+		Type:  "CERTIFICATE",
+		Bytes: serverCertData,
+	})
+
+	serverCertKeyMarshalled, _ := x509.MarshalPKCS8PrivateKey(serverCert.PrivateKey)
+	serverCertKeyPEMEncoded := pem.EncodeToMemory(&pem.Block{
+		Type:  "PRIVATE KEY",
+		Bytes: serverCertKeyMarshalled,
+	})
+
+	err = os.WriteFile(serverCertPath, serverCertPEMEncoded, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = os.WriteFile(serverCertKeyPath, serverCertKeyPEMEncoded, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// create a cert and key for the client to test client auth
+	var clientCert tls.Certificate
+
+	clientCertKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clientCert.PrivateKey = clientCertKey
+
+	clientCertSerial, err := rand.Int(rand.Reader, big.NewInt(math.MaxInt64))
+	if err != nil {
+		t.Fatal(err)
+	}
+	clientCertTemplate := &x509.Certificate{
+		BasicConstraintsValid: true,
+		SignatureAlgorithm:    x509.ECDSAWithSHA256,
+		PublicKeyAlgorithm:    x509.ECDSA,
+		PublicKey:             clientCertKey.Public(),
+		SerialNumber:          clientCertSerial,
+		Issuer:                caSubj,
+		Subject: pkix.Name{
+			CommonName:   "Client",
+			SerialNumber: clientCertSerial.String(),
+		},
+		NotBefore:   time.Now(),
+		NotAfter:    time.Now().Add(99 * time.Hour * 24 * 365),
+		KeyUsage:    x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
+		ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+	}
+
+	clientCertData, err := x509.CreateCertificate(rand.Reader, clientCertTemplate, caTemplate, clientCertKey.Public(), caKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	clientCertPEMEncoded := pem.EncodeToMemory(&pem.Block{
+		Type:  "CERTIFICATE",
+		Bytes: clientCertData,
+	})
+
+	clientCertKeyMarshalled, _ := x509.MarshalPKCS8PrivateKey(clientCert.PrivateKey)
+	clientCertKeyPEMEncoded := pem.EncodeToMemory(&pem.Block{
+		Type:  "PRIVATE KEY",
+		Bytes: clientCertKeyMarshalled,
+	})
+
+	err = os.WriteFile(clientCertPath, clientCertPEMEncoded, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = os.WriteFile(clientCertKeyPath, clientCertKeyPEMEncoded, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// configure the server to use the certs
+	initialCertPool := x509.NewCertPool()
+	ok := initialCertPool.AppendCertsFromPEM(caCertPEMEncoded)
+	if !ok {
+		t.Fatal("failed to add CA cert to cert pool")
+	}
+
+	initialCert, err := tls.LoadX509KeyPair(serverCertPath, serverCertKeyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	listener, err := net.Listen("tcp", "localhost:0")
+	if err != nil {
+		t.Fatalf("Unexpected error creating listener while finding free port: %s", err)
+	}
+
+	serverAddress := listener.Addr().String()
+	err = listener.Close()
+	if err != nil {
+		t.Fatalf("Unexpected error closing listener to free port: %s", err)
+	}
+
+	t.Log("server address:", serverAddress)
+
+	server := New().
+		WithAddresses([]string{serverAddress}).
+		WithStore(inmem.New()).
+		WithCertificate(&initialCert).
+		WithCertPool(x509.NewCertPool()). // empty cert pool
+		WithAuthentication(AuthenticationTLS).
+		WithTLSConfig(
+			&TLSConfig{
+				CertFile:     serverCertPath,
+				KeyFile:      serverCertKeyPath,
+				CertPoolFile: caCertPath, // currently empty
+			},
+		)
+
+	// start the server referencing the certs
+	m, err := plugins.New([]byte{}, "test", server.store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server = server.WithManager(m)
+	if err = m.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	server, err = server.Init(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	loops, err := server.Listeners()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, loop := range loops {
+		go func(serverLoop func() error) {
+			errc := make(chan error)
+			errc <- serverLoop()
+			err := <-errc
+			t.Errorf("Unexpected error from server loop: %s", err)
+		}(loop)
+	}
+
+	// wait for the server to start
+	retries := 10
+	for {
+		if retries == 0 {
+			t.Fatal("failed to start server before deadline")
+		}
+		_, err = tls.Dial("tcp", serverAddress, &tls.Config{RootCAs: initialCertPool})
+		if err != nil {
+			retries--
+			time.Sleep(300 * time.Millisecond)
+			continue
+		}
+		t.Log("server started")
+		break
+	}
+
+	// make the first request and check that the server is not trusting the client cert
+	clientKeyPair, err := tls.LoadX509KeyPair(clientCertPath, clientCertKeyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := &http.Client{
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{
+				RootCAs:      initialCertPool,
+				Certificates: []tls.Certificate{clientKeyPair},
+			},
+		},
+	}
+
+	// make a request and check that the server doesn't trust the client cert yet since it has no CA cert
+	retries = 10
+	expectedError := "remote error: tls"
+	for {
+		if retries == 0 {
+			t.Fatal("server didn't return expected error before deadline")
+		}
+
+		req, err := http.NewRequest("GET", fmt.Sprintf("https://%s/v1/data", serverAddress), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		_, err = client.Do(req)
+		if !strings.Contains(err.Error(), expectedError) {
+			t.Log("retrying, expected error:", expectedError, "but got:", err)
+			retries--
+			time.Sleep(300 * time.Millisecond)
+			continue
+		}
+
+		break
+	}
+
+	// update the cert pool file to include the CA cert
+	err = os.WriteFile(caCertPath, caCertPEMEncoded, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// make a second request and check that the server now trusts the client cert
+	retries = 10
+	for {
+		if retries == 0 {
+			t.Fatal("server didn't accept client cert before deadline")
+		}
+
+		req, err := http.NewRequest("GET", fmt.Sprintf("https://%s/v1/data", serverAddress), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		_, err = client.Do(req)
+		if err != nil {
+			t.Log("server still doesn't trust client cert")
+			retries--
+			time.Sleep(300 * time.Millisecond)
+			continue
+		}
+
+		break
+	}
+
+	// update the cert pool file to a new & different CA that hasn't signed the client cert
+	caKey, err = ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	caSerial, err = rand.Int(rand.Reader, big.NewInt(math.MaxInt64))
+	if err != nil {
+		t.Fatal(err)
+	}
+	caSubj = pkix.Name{
+		CommonName:   "CA 2",
+		SerialNumber: caSerial.String(),
+	}
+
+	caTemplate = &x509.Certificate{
+		BasicConstraintsValid: true,
+		SignatureAlgorithm:    x509.ECDSAWithSHA256,
+		PublicKeyAlgorithm:    x509.ECDSA,
+		PublicKey:             caKey.Public(),
+		SerialNumber:          caSerial,
+		Issuer:                caSubj,
+		Subject:               caSubj,
+		NotBefore:             time.Now(),
+		NotAfter:              time.Now().Add(100 * time.Hour * 24 * 365),
+		KeyUsage:              x509.KeyUsageCertSign,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth},
+		IsCA:                  true,
+		DNSNames:              nil,
+		EmailAddresses:        nil,
+		IPAddresses:           nil,
+	}
+
+	caCertData, err = x509.CreateCertificate(rand.Reader, caTemplate, caTemplate, caKey.Public(), caKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	caCertPEMEncoded = pem.EncodeToMemory(&pem.Block{
+		Type:  "CERTIFICATE",
+		Bytes: caCertData,
+	})
+
+	err = os.WriteFile(caCertPath, caCertPEMEncoded, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// make a final request and check that the server doesn't trust the client again
+	// since the loaded CA cert is different from the one that signed the client cert
+	retries = 10
+	for {
+		if retries == 0 {
+			t.Fatal("server didn't accept client cert before deadline")
+		}
+
+		req, err := http.NewRequest("GET", fmt.Sprintf("https://%s/v1/data", serverAddress), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		_, err = client.Do(req)
+		if err == nil {
+			t.Log("server still trusts client cert")
+			retries--
+			time.Sleep(300 * time.Millisecond)
+			continue
+		}
+
+		if !strings.Contains(err.Error(), "remote error: tls") {
+			t.Fatalf("expected unknown certificate authority error (server has different CA) but got: %s", err)
+		}
+
+		break
+	}
+
+	err = server.Shutdown(ctx)
+	if err != nil {
+		t.Fatalf("Unexpected error shutting down server: %s", err)
+	}
+
+}
+
+func TestCertReloading(t *testing.T) {
+
+	ctx := context.Background()
+
+	testCases := map[string]struct {
+		Server func(
+			addr string,
+			initialCert *tls.Certificate,
+			initialCertPool *x509.CertPool,
+			certFilePath, keyFilePath, caCertPath string,
+		) *Server
+	}{
+		"fs notified server": {
+			Server: func(
+				addr string,
+				initialCert *tls.Certificate,
+				initialCertPool *x509.CertPool,
+				certFilePath, keyFilePath, caCertPath string,
+			) *Server {
+				return New().
+					WithAddresses([]string{addr}).
+					WithStore(inmem.New()).
+					WithCertificate(initialCert).
+					WithCertPool(initialCertPool).
+					WithTLSConfig(
+						&TLSConfig{
+							CertFile:     certFilePath,
+							KeyFile:      keyFilePath,
+							CertPoolFile: caCertPath,
+						},
+					)
+			},
+		},
+		"interval reloaded server": {
+			Server: func(
+				addr string,
+				initialCert *tls.Certificate,
+				initialCertPool *x509.CertPool,
+				certFilePath, keyFilePath, _ string,
+			) *Server {
+				return New().
+					WithAddresses([]string{addr}).
+					WithStore(inmem.New()).
+					WithCertificate(initialCert).
+					WithCertPool(initialCertPool).
+					WithCertificatePaths(
+						certFilePath,
+						keyFilePath,
+						1*time.Second,
+					)
+			},
+		},
+	}
+
+	for name, tc := range testCases {
+		t.Run(name, func(t *testing.T) {
+
+			tempDir := t.TempDir()
+
+			serverCert1Path := filepath.Join(tempDir, "serverCert1.pem")
+			serverCert1KeyPath := filepath.Join(tempDir, "serverCert1Key.pem")
+			serverCert2Path := filepath.Join(tempDir, "serverCert2.pem")
+			serverCert2KeyPath := filepath.Join(tempDir, "serverCert2Key.pem")
+			caCertPath := filepath.Join(tempDir, "ca.pem")
+
+			t.Helper()
+
+			san := net.ParseIP("127.0.0.1")
+
+			// create the CA cert used in the cert pool and for signing server certs
+			caKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			caSerial, err := rand.Int(rand.Reader, big.NewInt(math.MaxInt64))
+			if err != nil {
+				t.Fatal(err)
+			}
+			caSubj := pkix.Name{
+				CommonName:   "CA",
+				SerialNumber: caSerial.String(),
+			}
+			caTemplate := &x509.Certificate{
+				BasicConstraintsValid: true,
+				SignatureAlgorithm:    x509.ECDSAWithSHA256,
+				PublicKeyAlgorithm:    x509.ECDSA,
+				PublicKey:             caKey.Public(),
+				SerialNumber:          caSerial,
+				Issuer:                caSubj,
+				Subject:               caSubj,
+				NotBefore:             time.Now(),
+				NotAfter:              time.Now().Add(100 * time.Hour * 24 * 365),
+				KeyUsage:              x509.KeyUsageCertSign,
+				ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+				IsCA:                  true,
+			}
+
+			caCertData, err := x509.CreateCertificate(rand.Reader, caTemplate, caTemplate, caKey.Public(), caKey)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			caCertPEMEncoded := pem.EncodeToMemory(&pem.Block{
+				Type:  "CERTIFICATE",
+				Bytes: caCertData,
+			})
+
+			err = os.WriteFile(caCertPath, caCertPEMEncoded, 0o600)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			// create a cert and key for the server to load at startup
+			var serverCert1 tls.Certificate
+
+			serverCert1Key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+			if err != nil {
+				t.Fatal(err)
+			}
+			serverCert1.PrivateKey = serverCert1Key
+
+			serverCert1Serial, err := rand.Int(rand.Reader, big.NewInt(math.MaxInt64))
+			if err != nil {
+				t.Fatal(err)
+			}
+			serverCert1Template := &x509.Certificate{
+				BasicConstraintsValid: true,
+				SignatureAlgorithm:    x509.ECDSAWithSHA256,
+				PublicKeyAlgorithm:    x509.ECDSA,
+				PublicKey:             serverCert1Key.Public(),
+				SerialNumber:          serverCert1Serial,
+				Issuer:                caSubj,
+				Subject: pkix.Name{
+					CommonName:   "Server 1",
+					SerialNumber: serverCert1Serial.String(),
+				},
+				NotBefore:   time.Now(),
+				NotAfter:    time.Now().Add(99 * time.Hour * 24 * 365),
+				ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+				IPAddresses: []net.IP{san},
+			}
+
+			serverCert1Data2, err := x509.CreateCertificate(rand.Reader, serverCert1Template, caTemplate, serverCert1Key.Public(), caKey)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			serverCert1PEMEncoded := pem.EncodeToMemory(&pem.Block{
+				Type:  "CERTIFICATE",
+				Bytes: serverCert1Data2,
+			})
+
+			serverCert1KeyMarshalled, _ := x509.MarshalPKCS8PrivateKey(serverCert1.PrivateKey)
+			serverCert1KeyPEMEncoded := pem.EncodeToMemory(&pem.Block{
+				Type:  "PRIVATE KEY",
+				Bytes: serverCert1KeyMarshalled,
+			})
+
+			err = os.WriteFile(serverCert1Path, serverCert1PEMEncoded, 0o600)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			err = os.WriteFile(serverCert1KeyPath, serverCert1KeyPEMEncoded, 0o600)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			// create a cert to load after startup
+			var serverCert2 tls.Certificate
+
+			serverCert2Key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+			if err != nil {
+				t.Fatal(err)
+			}
+			serverCert2.PrivateKey = serverCert2Key
+
+			serverCert2Serial, err := rand.Int(rand.Reader, big.NewInt(math.MaxInt64))
+			if err != nil {
+				t.Fatal(err)
+			}
+			serverCert1Template = &x509.Certificate{
+				BasicConstraintsValid: true,
+				SignatureAlgorithm:    x509.ECDSAWithSHA256,
+				PublicKeyAlgorithm:    x509.ECDSA,
+				PublicKey:             serverCert2Key.Public(),
+				SerialNumber:          serverCert2Serial,
+				Issuer:                caSubj,
+				Subject: pkix.Name{
+					CommonName:   "Server 2",
+					SerialNumber: serverCert1Serial.String(),
+				},
+				NotBefore:   time.Now(),
+				NotAfter:    time.Now().Add(99 * time.Hour * 24 * 365),
+				ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+				IPAddresses: []net.IP{san},
+			}
+
+			serverCert2Data2, err := x509.CreateCertificate(rand.Reader, serverCert1Template, caTemplate, serverCert2Key.Public(), caKey)
+			if err != nil {
+				t.Fatal(err)
+			}
+			serverCert2.Certificate = [][]byte{serverCert2Data2, caCertData}
+
+			serverCert2PEMEncoded := pem.EncodeToMemory(&pem.Block{
+				Type:  "CERTIFICATE",
+				Bytes: serverCert2Data2,
+			})
+
+			serverCert2KeyMarshalled, _ := x509.MarshalPKCS8PrivateKey(serverCert2.PrivateKey)
+			serverCert2KeyPEMEncoded := pem.EncodeToMemory(&pem.Block{
+				Type:  "PRIVATE KEY",
+				Bytes: serverCert2KeyMarshalled,
+			})
+
+			err = os.WriteFile(serverCert2Path, serverCert2PEMEncoded, 0o600)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			err = os.WriteFile(serverCert2KeyPath, serverCert2KeyPEMEncoded, 0o600)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			certPool2 := x509.NewCertPool()
+			ok := certPool2.AppendCertsFromPEM(caCertPEMEncoded)
+			if !ok {
+				t.Fatal("failed to add CA cert to cert pool")
+			}
+			certPool, _, _, serverCert1Data, serverCert2Data := certPool2, &serverCert1, &serverCert2, serverCert1Data2, serverCert2Data2
+
+			initialCert, err := tls.LoadX509KeyPair(serverCert1Path, serverCert1KeyPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			listener, err := net.Listen("tcp", "localhost:0")
+			if err != nil {
+				t.Fatalf("Unexpected error creating listener while finding free port: %s", err)
+			}
+
+			serverAddress := listener.Addr().String()
+			err = listener.Close()
+			if err != nil {
+				t.Fatalf("Unexpected error closing listener to free port: %s", err)
+			}
+
+			t.Log("server address:", serverAddress)
+
+			server := tc.Server(serverAddress, &initialCert, certPool, serverCert1Path, serverCert1KeyPath, caCertPath)
+
+			// start the server referencing the certs
+			m, err := plugins.New([]byte{}, "test", server.store)
+			if err != nil {
+				t.Fatal(err)
+			}
+			server = server.WithManager(m)
+			if err = m.Start(ctx); err != nil {
+				t.Fatal(err)
+			}
+			server, err = server.Init(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			loops, err := server.Listeners()
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			for _, loop := range loops {
+				go func(serverLoop func() error) {
+					errc := make(chan error)
+					errc <- serverLoop()
+					err := <-errc
+					t.Errorf("Unexpected error from server loop: %s", err)
+				}(loop)
+			}
+
+			// wait for the server to start
+			retries := 10
+			for {
+				if retries == 0 {
+					t.Fatal("failed to start server before deadline")
+				}
+				_, err = tls.Dial("tcp", serverAddress, &tls.Config{RootCAs: certPool})
+				if err != nil {
+					retries--
+					time.Sleep(300 * time.Millisecond)
+					continue
+				}
+				t.Log("server started")
+				break
+			}
+
+			// make the first connection, check that the server 1 cert is returned
+			retries = 10
+			for {
+				if retries == 0 {
+					t.Fatal("failed to get serverCert1 before deadline")
+				}
+				conn, err := tls.Dial("tcp", serverAddress, &tls.Config{RootCAs: certPool})
+				if err != nil {
+					t.Fatal(err)
+				}
+				err = conn.Close()
+				if err != nil {
+					t.Fatal(err)
+				}
+
+				certs := conn.ConnectionState().PeerCertificates
+				if len(certs) != 1 {
+					t.Fatalf("expected 1 cert, got %d", len(certs))
+				}
+
+				servedCert := certs[0]
+				if !bytes.Equal(servedCert.Raw, serverCert1Data) {
+					retries--
+					time.Sleep(300 * time.Millisecond)
+					t.Logf("expected serverCert1, got %s", servedCert.Subject)
+					continue
+				}
+
+				break
+			}
+
+			// update the cert and key files by moving the second cert into place instead
+			err = os.Rename(serverCert2Path, serverCert1Path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = os.Rename(serverCert2KeyPath, serverCert1KeyPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			// make another connection, check that the server 2 cert is returned
+			retries = 10
+			for {
+				if retries == 0 {
+					t.Fatal("failed to get serverCert2 before deadline")
+				}
+
+				conn, err := tls.Dial("tcp", serverAddress, &tls.Config{RootCAs: certPool})
+				if err != nil {
+					t.Fatal(err)
+				}
+				err = conn.Close()
+				if err != nil {
+					t.Fatal(err)
+				}
+				certs := conn.ConnectionState().PeerCertificates
+				if len(certs) != 1 {
+					t.Fatalf("expected 1 cert, got %d", len(certs))
+				}
+
+				servedCert := certs[0]
+				if !bytes.Equal(servedCert.Raw, serverCert2Data) {
+					retries--
+					time.Sleep(300 * time.Millisecond)
+					t.Logf("expected serverCert2, got %s", servedCert.Subject)
+					continue
+				}
+
+				break
+			}
+
+			// remove the certs on disk, and check that the server still serves the previous certs
+			err = os.Remove(serverCert1Path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = os.Remove(serverCert1KeyPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			// make a third connection, and check that the server 2 cert is still returned despite the certs being removed
+			retries = 10
+			for {
+				if retries == 0 {
+					t.Fatal("failed to get serverCert2 before deadline")
+				}
+
+				conn, err := tls.Dial("tcp", serverAddress, &tls.Config{RootCAs: certPool})
+				if err != nil {
+					t.Fatal(err)
+				}
+				err = conn.Close()
+				if err != nil {
+					t.Fatal(err)
+				}
+
+				certs := conn.ConnectionState().PeerCertificates
+				if len(certs) != 1 {
+					t.Fatalf("expected 1 cert, got %d", len(certs))
+				}
+
+				servedCert := certs[0]
+				if !bytes.Equal(servedCert.Raw, serverCert2Data) {
+					retries--
+					time.Sleep(300 * time.Millisecond)
+					t.Logf("expected serverCert2, got %s", servedCert.Subject)
+					continue
+				}
+
+				break
+			}
+
+			err = server.Shutdown(ctx)
+			if err != nil {
+				t.Fatalf("Unexpected error shutting down server: %s", err)
+			}
+		})
+	}
+
 }
 
 type mockHTTPHandler struct{}

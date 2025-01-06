@@ -3,18 +3,20 @@ package cmd
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"path"
 	"path/filepath"
 	"regexp"
 	"strings"
-	"sync"
 	"syscall"
 	"testing"
 	"time"
 
 	"github.com/open-policy-agent/opa/ast"
+	"github.com/open-policy-agent/opa/bundle"
+	"github.com/open-policy-agent/opa/internal/file/archive"
 	"github.com/open-policy-agent/opa/rego"
 	"github.com/open-policy-agent/opa/topdown"
 	"github.com/open-policy-agent/opa/util/test"
@@ -217,6 +219,1322 @@ func failTrace(t *testing.T) []*topdown.Event {
 	}
 
 	return *tracer
+}
+
+func TestPrettyTraceWithLocalVars(t *testing.T) {
+	tests := []struct {
+		note        string
+		includeVars bool
+		files       map[string]string
+		expected    string
+	}{
+		{
+			note:        "without vars",
+			includeVars: false,
+			files: map[string]string{
+				"test.rego": `package test
+import rego.v1
+
+test_p if {
+	x := 1
+	y := 2
+	z := 3
+	x == z + y
+} 
+`,
+			},
+			expected: `FAILURES
+--------------------------------------------------------------------------------
+data.test.test_p: FAIL (%.*%)
+
+  query:1 %.*%           Enter data.test.test_p = _  
+  query:1 %.*%           | Eval data.test.test_p = _  
+  query:1 %.*%           | Index data.test.test_p (matched 1 rule, early exit)  
+  %.*%/test.rego:4       | Enter data.test.test_p  
+  %.*%/test.rego:5       | | Eval x = 1  
+  %.*%/test.rego:6       | | Eval y = 2  
+  %.*%/test.rego:7       | | Eval z = 3  
+  %.*%/test.rego:8       | | Eval plus(z, y, __local3__)  
+  %.*%/test.rego:8       | | Eval x = __local3__  
+  %.*%/test.rego:8       | | Fail x = __local3__  
+  %.*%/test.rego:8       | | Redo plus(z, y, __local3__)  
+  %.*%/test.rego:7       | | Redo z = 3  
+  %.*%/test.rego:6       | | Redo y = 2  
+  %.*%/test.rego:5       | | Redo x = 1  
+  query:1 %.*%           | Fail data.test.test_p = _  
+
+SUMMARY
+--------------------------------------------------------------------------------
+%.*%/test.rego:
+data.test.test_p: FAIL (%.*%)
+--------------------------------------------------------------------------------
+FAIL: 1/1
+`,
+		},
+		{
+			note:        "with vars",
+			includeVars: true,
+			files: map[string]string{
+				"test.rego": `package test
+import rego.v1
+
+test_p if {
+	x := 1
+	y := 2
+	z := 3
+	x == z + y
+} 
+`,
+			},
+			expected: `FAILURES
+--------------------------------------------------------------------------------
+data.test.test_p: FAIL (%.*%)
+
+  query:1 %.*%           Enter data.test.test_p = _                                  {}  
+  query:1 %.*%           | Eval data.test.test_p = _                                 {}  
+  query:1 %.*%           | Index data.test.test_p (matched 1 rule, early exit)       {}  
+  %.*%/test.rego:4       | Enter data.test.test_p                                    {}  
+  %.*%/test.rego:5       | | Eval x = 1                                              {}  
+  %.*%/test.rego:6       | | Eval y = 2                                              {}  
+  %.*%/test.rego:7       | | Eval z = 3                                              {}  
+  %.*%/test.rego:8       | | Eval plus(z, y, __local3__)                             {y: 2, z: 3}  
+  %.*%/test.rego:8       | | Eval x = __local3__                                     {__local3__: 5, x: 1}  
+  %.*%/test.rego:8       | | Fail x = __local3__                                     {__local3__: 5, x: 1}  
+  %.*%/test.rego:8       | | Redo plus(z, y, __local3__)                             {__local3__: 5, y: 2, z: 3}  
+  %.*%/test.rego:7       | | Redo z = 3                                              {z: 3}  
+  %.*%/test.rego:6       | | Redo y = 2                                              {y: 2}  
+  %.*%/test.rego:5       | | Redo x = 1                                              {x: 1}  
+  query:1   %.*%         | Fail data.test.test_p = _                                 {}  
+
+  %.*%/test.rego:8:
+    	x == z + y
+    	|    |   |
+    	|    |   2
+    	|    z + y: 5
+    	|    z: 3
+    	1
+
+SUMMARY
+--------------------------------------------------------------------------------
+%.*%/test.rego:
+data.test.test_p: FAIL (%.*%)
+--------------------------------------------------------------------------------
+FAIL: 1/1
+`,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.note, func(t *testing.T) {
+			test.WithTempFS(tc.files, func(root string) {
+				buf := new(bytes.Buffer)
+				testParams := newTestCommandParams()
+				testParams.count = 1
+				testParams.output = buf
+				testParams.errOutput = io.Discard
+				testParams.bundleMode = true
+				testParams.verbose = true
+				testParams.varValues = tc.includeVars
+				_ = testParams.explain.Set(explainModeFull)
+
+				_, err := opaTest([]string{root}, testParams)
+				if err != nil {
+					t.Fatalf("Unexpected error: %s", err)
+				}
+
+				actual := buf.String()
+				if !stringsMatch(t, tc.expected, actual) {
+					t.Fatalf("Expected:\n\n%v\n\nGot:\n\n%v", tc.expected, actual)
+				}
+			})
+		})
+	}
+}
+
+func TestFailVarValues(t *testing.T) {
+	tests := []struct {
+		note     string
+		files    map[string]string
+		expected string
+	}{
+		{
+			note: "simple",
+			files: map[string]string{
+				"/test.rego": `package test
+import rego.v1
+
+test_foo if {
+	x := 1
+	y := 2
+	z := 3
+	x == y + z
+}
+`,
+			},
+			expected: `FAILURES
+--------------------------------------------------------------------------------
+data.test.test_foo: FAIL (%TIME%)
+
+  %ROOT%/test.rego:8:
+    	x == y + z
+    	|    |   |
+    	|    |   3
+    	|    y + z: 5
+    	|    y: 2
+    	1
+
+SUMMARY
+--------------------------------------------------------------------------------
+%ROOT%/test.rego:
+data.test.test_foo: FAIL (%TIME%)
+--------------------------------------------------------------------------------
+FAIL: 1/1
+`,
+		},
+		{
+			note: "simple (not)",
+			files: map[string]string{
+				"/test.rego": `package test
+import rego.v1
+
+test_foo if {
+	x := 5
+	y := 2
+	z := 3
+	not x == y + z
+}
+`,
+			},
+			expected: `FAILURES
+--------------------------------------------------------------------------------
+data.test.test_foo: FAIL (%TIME%)
+
+  %ROOT%/test.rego:8:
+    	not x == y + z
+    	    |    |   |
+    	    |    |   3
+    	    |    y + z: 5
+    	    |    y: 2
+    	    5
+
+SUMMARY
+--------------------------------------------------------------------------------
+%ROOT%/test.rego:
+data.test.test_foo: FAIL (%TIME%)
+--------------------------------------------------------------------------------
+FAIL: 1/1
+`,
+		},
+		{
+			note: "array",
+			files: map[string]string{
+				"/test.rego": `package test
+import rego.v1
+
+test_foo if {
+	x := 1
+	y := [1, 2, 3]
+	z := 3
+	x == y[2] + z
+}
+`,
+			},
+			expected: `FAILURES
+--------------------------------------------------------------------------------
+data.test.test_foo: FAIL (%TIME%)
+
+  %ROOT%/test.rego:8:
+    	x == y[2] + z
+    	|    |      |
+    	|    |      3
+    	|    y[2] + z: 6
+    	|    y[2]: 3
+    	|    y: [1, 2, 3]
+    	1
+
+SUMMARY
+--------------------------------------------------------------------------------
+%ROOT%/test.rego:
+data.test.test_foo: FAIL (%TIME%)
+--------------------------------------------------------------------------------
+FAIL: 1/1
+`,
+		},
+		{
+			note: "array, var key",
+			files: map[string]string{
+				"/test.rego": `package test
+import rego.v1
+
+test_foo if {
+	x := 1
+	y := [1, 2, 3]
+	z := 3
+	i := 2
+	x == y[i] + z
+}
+`,
+			},
+			expected: `FAILURES
+--------------------------------------------------------------------------------
+data.test.test_foo: FAIL (%TIME%)
+
+  %ROOT%/test.rego:9:
+    	x == y[i] + z
+    	|    | |    |
+    	|    | |    3
+    	|    | 2
+    	|    y[i] + z: 6
+    	|    y[i]: 3
+    	|    y: [1, 2, 3]
+    	1
+
+SUMMARY
+--------------------------------------------------------------------------------
+%ROOT%/test.rego:
+data.test.test_foo: FAIL (%TIME%)
+--------------------------------------------------------------------------------
+FAIL: 1/1
+`,
+		},
+		{
+			note: "array containing vars",
+			files: map[string]string{
+				"/test.rego": `package test
+import rego.v1
+
+test_foo if {
+	x := 1
+	y := 2
+	z := 3
+	[x, y, z] == [4, 5, 6]
+}
+`,
+			},
+			expected: `FAILURES
+--------------------------------------------------------------------------------
+data.test.test_foo: FAIL (%TIME%)
+
+  %ROOT%/test.rego:8:
+    	[x, y, z] == [4, 5, 6]
+    	 |  |  |
+    	 |  |  3
+    	 |  2
+    	 1
+
+SUMMARY
+--------------------------------------------------------------------------------
+%ROOT%/test.rego:
+data.test.test_foo: FAIL (%TIME%)
+--------------------------------------------------------------------------------
+FAIL: 1/1
+`,
+		},
+		{
+			note: "array containing refs",
+			files: map[string]string{
+				"/test.rego": `package test
+import rego.v1
+
+a := 1
+
+b := 2
+
+test_foo if {
+	[a, data.test.b, data.c] == [4, 5, 6]
+}
+`,
+				"data.json": `{"c": 3}`,
+			},
+			expected: `FAILURES
+--------------------------------------------------------------------------------
+data.test.test_foo: FAIL (%TIME%)
+
+  %ROOT%/test.rego:9:
+    	[a, data.test.b, data.c] == [4, 5, 6]
+    	 |  |            |
+    	 |  |            3
+    	 |  2
+    	 1
+
+SUMMARY
+--------------------------------------------------------------------------------
+%ROOT%/test.rego:
+data.test.test_foo: FAIL (%TIME%)
+--------------------------------------------------------------------------------
+FAIL: 1/1
+`,
+		},
+		{
+			note: "array containing refs, undefined",
+			files: map[string]string{
+				"/test.rego": `package test
+import rego.v1
+
+a := 1
+
+b := data.b
+
+test_foo if {
+	[a, b, data.c] == [4, 5, 6]
+}
+`,
+				"data.json": `{"c": 3}`,
+			},
+			// Note: each dynamic array element is broken out into a separate "co-expression" by the compiler.
+			// Since we failed on the 2nd element (b), we don't have value for the 3rd element (data.c).
+			expected: `FAILURES
+--------------------------------------------------------------------------------
+data.test.test_foo: FAIL (%TIME%)
+
+  %ROOT%/test.rego:9:
+    	[a, b, data.c] == [4, 5, 6]
+    	 |  |
+    	 |  undefined
+    	 1
+
+SUMMARY
+--------------------------------------------------------------------------------
+%ROOT%/test.rego:
+data.test.test_foo: FAIL (%TIME%)
+--------------------------------------------------------------------------------
+FAIL: 1/1
+`,
+		},
+		{
+			note: "nested collections containing vars",
+			files: map[string]string{
+				"/test.rego": `package test
+import rego.v1
+
+test_foo if {
+	x := 1
+	y := 2
+	z := 3
+	[x, {y, {"a": z}}] == [4, {5, {"a": 6}}]
+}
+`,
+			},
+			expected: `FAILURES
+--------------------------------------------------------------------------------
+data.test.test_foo: FAIL (%TIME%)
+
+  %ROOT%/test.rego:8:
+    	[x, {y, {"a": z}}] == [4, {5, {"a": 6}}]
+    	 |   |        |
+    	 |   |        3
+    	 |   2
+    	 1
+
+SUMMARY
+--------------------------------------------------------------------------------
+%ROOT%/test.rego:
+data.test.test_foo: FAIL (%TIME%)
+--------------------------------------------------------------------------------
+FAIL: 1/1
+`,
+		},
+		{
+			note: "single line expression containing tabs",
+			files: map[string]string{
+				"/test.rego": `package test
+	import rego.v1
+
+	test_foo if {
+		x := 1
+		y := 2
+		z := 3
+		x == y +	z
+	}
+`,
+			},
+			expected: `FAILURES
+--------------------------------------------------------------------------------
+data.test.test_foo: FAIL (%TIME%)
+
+  %ROOT%/test.rego:8:
+    		x == y +	z
+    		|    |  	|
+    		|    |  	3
+    		|    y +	z: 5
+    		|    y: 2
+    		1
+
+SUMMARY
+--------------------------------------------------------------------------------
+%ROOT%/test.rego:
+data.test.test_foo: FAIL (%TIME%)
+--------------------------------------------------------------------------------
+FAIL: 1/1
+`,
+		},
+		{
+			note: "single line expression containing tabs #2",
+			files: map[string]string{
+				"/test.rego": `package test
+	import rego.v1
+
+	test_foo if {
+		x := 1
+		y := 2
+		z := 3
+		x	== y +	z
+	}
+`,
+			},
+			expected: `FAILURES
+--------------------------------------------------------------------------------
+data.test.test_foo: FAIL (%TIME%)
+
+  %ROOT%/test.rego:8:
+    		x	== y +	z
+    		|	   |  	|
+    		|	   |  	3
+    		|	   y +	z: 5
+    		|	   y: 2
+    		1
+
+SUMMARY
+--------------------------------------------------------------------------------
+%ROOT%/test.rego:
+data.test.test_foo: FAIL (%TIME%)
+--------------------------------------------------------------------------------
+FAIL: 1/1
+`,
+		},
+		{
+			note: "multi-line expression containing tabs",
+			files: map[string]string{
+				"/test.rego": `package test
+	import rego.v1
+
+	test_foo if {
+		x := 1
+		y := 2
+		z := 3
+		obj := {
+			"foo_": 1,
+			"bar__": 42,
+			"baz": 3,
+		}
+		obj == {
+			"foo_":		x,
+			"bar__":	y,
+			"baz":		z,
+		}
+	}
+`,
+			},
+			// We can't deal with tabs in a consistent manner when they occur on multiple lines
+			expected: `FAILURES
+--------------------------------------------------------------------------------
+data.test.test_foo: FAIL (%TIME%)
+
+  %ROOT%/test.rego:13:
+    		obj == {
+    			"foo_":		x,
+    			"bar__":	y,
+    			"baz":		z,
+    		}
+    
+    Where:
+    
+    obj: {"bar__": 42, "baz": 3, "foo_": 1}
+    x: 1
+    y: 2
+    z: 3
+
+SUMMARY
+--------------------------------------------------------------------------------
+%ROOT%/test.rego:
+data.test.test_foo: FAIL (%TIME%)
+--------------------------------------------------------------------------------
+FAIL: 1/1
+`,
+		},
+		{
+			note: "composite rule",
+			files: map[string]string{
+				"/test.rego": `package test
+import rego.v1
+
+p contains v if {
+	some v in numbers.range(1, 3)
+}
+
+test_p if {
+	p == {4, 5, 6}
+}`,
+			},
+			expected: `FAILURES
+--------------------------------------------------------------------------------
+data.test.test_p: FAIL (%TIME%)
+
+  %ROOT%/test.rego:9:
+    	p == {4, 5, 6}
+    	|
+    	{1, 2, 3}
+
+SUMMARY
+--------------------------------------------------------------------------------
+%ROOT%/test.rego:
+data.test.test_p: FAIL (%TIME%)
+--------------------------------------------------------------------------------
+FAIL: 1/1
+`,
+		},
+		{
+			note: "composite rule with ref-head",
+			files: map[string]string{
+				"/test.rego": `package test
+import rego.v1
+
+p.q contains v if {
+	some v in numbers.range(1, 3)
+}
+
+test_p if {
+	p.q == {4, 5, 6}
+}`,
+			},
+			expected: `FAILURES
+--------------------------------------------------------------------------------
+data.test.test_p: FAIL (%TIME%)
+
+  %ROOT%/test.rego:9:
+    	p.q == {4, 5, 6}
+    	|
+    	{1, 2, 3}
+
+SUMMARY
+--------------------------------------------------------------------------------
+%ROOT%/test.rego:
+data.test.test_p: FAIL (%TIME%)
+--------------------------------------------------------------------------------
+FAIL: 1/1
+`,
+		},
+		{
+			note: "composite rule with ref-head, partial ref",
+			files: map[string]string{
+				"/test.rego": `package test
+import rego.v1
+
+p.q contains v if {
+	some v in numbers.range(1, 3)
+}
+
+test_p if {
+	p == {
+		"q": {4, 5, 6}
+	}
+}`,
+			},
+			expected: `FAILURES
+--------------------------------------------------------------------------------
+data.test.test_p: FAIL (%TIME%)
+
+  %ROOT%/test.rego:9:
+    	p == {
+    		"q": {4, 5, 6}
+    	}
+    	|
+    	{"q": {1, 2, 3}}
+
+SUMMARY
+--------------------------------------------------------------------------------
+%ROOT%/test.rego:
+data.test.test_p: FAIL (%TIME%)
+--------------------------------------------------------------------------------
+FAIL: 1/1
+`,
+		},
+		{
+			note: "composite rules with ref-head, composite value",
+			files: map[string]string{
+				"/test.rego": `package test
+import rego.v1
+
+p.q contains v if {
+	some v in numbers.range(1, 3)
+}
+
+p.r := "foo"
+
+test_p if {
+	p == {
+		"q": {4, 5, 6},
+		"r": "bar"
+	}
+}`,
+			},
+			expected: `FAILURES
+--------------------------------------------------------------------------------
+data.test.test_p: FAIL (%TIME%)
+
+  %ROOT%/test.rego:11:
+    	p == {
+    		"q": {4, 5, 6},
+    		"r": "bar"
+    	}
+    	|
+    	{"q": {1, 2, 3}, "r": "foo"}
+
+SUMMARY
+--------------------------------------------------------------------------------
+%ROOT%/test.rego:
+data.test.test_p: FAIL (%TIME%)
+--------------------------------------------------------------------------------
+FAIL: 1/1
+`,
+		},
+		{
+			note: "refs in different compiled sub-expressions",
+			files: map[string]string{
+				"/test.rego": `package test
+import rego.v1
+
+a := 1
+b := 2
+c := 3
+
+test_p if {
+	# This expression is split into multiple final expressions by the compiler, each containing a rule ref
+	a == b + c
+}
+`,
+			},
+			expected: `FAILURES
+--------------------------------------------------------------------------------
+data.test.test_p: FAIL (%TIME%)
+
+  %ROOT%/test.rego:10:
+    	a == b + c
+    	|    |   |
+    	|    |   3
+    	|    b + c: 5
+    	|    b: 2
+    	1
+
+SUMMARY
+--------------------------------------------------------------------------------
+%ROOT%/test.rego:
+data.test.test_p: FAIL (%TIME%)
+--------------------------------------------------------------------------------
+FAIL: 1/1
+`,
+		},
+		{
+			note: "rule not defined",
+			files: map[string]string{
+				"/test.rego": `package test
+import rego.v1
+
+p if {
+	input.x == 1
+}
+
+test_p if {
+	p with input.x as 2
+}`,
+			},
+			expected: `FAILURES
+--------------------------------------------------------------------------------
+data.test.test_p: FAIL (%TIME%)
+
+  %ROOT%/test.rego:9:
+    	p with input.x as 2
+    	|
+    	undefined
+
+SUMMARY
+--------------------------------------------------------------------------------
+%ROOT%/test.rego:
+data.test.test_p: FAIL (%TIME%)
+--------------------------------------------------------------------------------
+FAIL: 1/1
+`,
+		},
+		{
+			note: "rule defined (not)",
+			files: map[string]string{
+				"/test.rego": `package test
+import rego.v1
+
+p if {
+	input.x == 1
+}
+
+test_p if {
+	not p with input.x as 1
+}`,
+			},
+			expected: `FAILURES
+--------------------------------------------------------------------------------
+data.test.test_p: FAIL (%TIME%)
+
+  %ROOT%/test.rego:9:
+    	not p with input.x as 1
+    	    |
+    	    true
+
+SUMMARY
+--------------------------------------------------------------------------------
+%ROOT%/test.rego:
+data.test.test_p: FAIL (%TIME%)
+--------------------------------------------------------------------------------
+FAIL: 1/1
+`,
+		},
+		{
+			note: "data ref",
+			files: map[string]string{
+				"/test.rego": `package test
+import rego.v1
+
+test_foo if {
+	y := 1
+	data.x == y
+}
+`,
+				"data.json": `{"x": 2}`,
+			},
+			expected: `FAILURES
+--------------------------------------------------------------------------------
+data.test.test_foo: FAIL (%TIME%)
+
+  %ROOT%/test.rego:6:
+    	data.x == y
+    	|         |
+    	|         1
+    	2
+
+SUMMARY
+--------------------------------------------------------------------------------
+%ROOT%/test.rego:
+data.test.test_foo: FAIL (%TIME%)
+--------------------------------------------------------------------------------
+FAIL: 1/1
+`,
+		},
+		{
+			note: "data + virtual extent ref",
+			files: map[string]string{
+				"/test.rego": `package test
+import rego.v1
+
+foo.x := 1
+
+test_foo if {
+	y := {"x": 1, "y": 42}
+	foo == y
+}
+`,
+				"data.json": `{"test": {"foo": {"y": 2}}}`,
+			},
+			expected: `FAILURES
+--------------------------------------------------------------------------------
+data.test.test_foo: FAIL (%TIME%)
+
+  %ROOT%/test.rego:8:
+    	foo == y
+    	|      |
+    	|      {"x": 1, "y": 42}
+    	{"x": 1, "y": 2}
+
+SUMMARY
+--------------------------------------------------------------------------------
+%ROOT%/test.rego:
+data.test.test_foo: FAIL (%TIME%)
+--------------------------------------------------------------------------------
+FAIL: 1/1
+`,
+		},
+		{
+			note: "in (array)",
+			files: map[string]string{
+				"/test.rego": `package test
+import rego.v1
+
+test_foo if {
+	l := ["a", "b", "c"]
+	x := "q"
+	x in l
+}
+`,
+			},
+			expected: `FAILURES
+--------------------------------------------------------------------------------
+data.test.test_foo: FAIL (%TIME%)
+
+  %ROOT%/test.rego:7:
+    	x in l
+    	|    |
+    	|    ["a", "b", "c"]
+    	"q"
+
+SUMMARY
+--------------------------------------------------------------------------------
+%ROOT%/test.rego:
+data.test.test_foo: FAIL (%TIME%)
+--------------------------------------------------------------------------------
+FAIL: 1/1
+`,
+		},
+		{
+			note: "in (set)",
+			files: map[string]string{
+				"/test.rego": `package test
+import rego.v1
+
+test_foo if {
+	l := {"a", "b", "c"}
+	x := "q"
+	x in l
+}
+`,
+			},
+			expected: `FAILURES
+--------------------------------------------------------------------------------
+data.test.test_foo: FAIL (%TIME%)
+
+  %ROOT%/test.rego:7:
+    	x in l
+    	|    |
+    	|    {"a", "b", "c"}
+    	"q"
+
+SUMMARY
+--------------------------------------------------------------------------------
+%ROOT%/test.rego:
+data.test.test_foo: FAIL (%TIME%)
+--------------------------------------------------------------------------------
+FAIL: 1/1
+`,
+		},
+		{
+			note: "comprehension (array)",
+			files: map[string]string{
+				"/test.rego": `package test
+import rego.v1
+
+test_foo if {
+	l := ["a", "b", "c"]
+	[x | x := l[_]] == ["d", "e", "f"]
+}
+`,
+			},
+			expected: `FAILURES
+--------------------------------------------------------------------------------
+data.test.test_foo: FAIL (%TIME%)
+
+  %ROOT%/test.rego:6:
+    	[x | x := l[_]] == ["d", "e", "f"]
+    	|
+    	["a", "b", "c"]
+
+SUMMARY
+--------------------------------------------------------------------------------
+%ROOT%/test.rego:
+data.test.test_foo: FAIL (%TIME%)
+--------------------------------------------------------------------------------
+FAIL: 1/1
+`,
+		},
+		{
+			note: "comprehension (set)",
+			files: map[string]string{
+				"/test.rego": `package test
+import rego.v1
+
+test_foo if {
+	l := ["a"]
+	{x | x := l[_]} == {"b"}
+}
+`,
+			},
+			expected: `FAILURES
+--------------------------------------------------------------------------------
+data.test.test_foo: FAIL (%TIME%)
+
+  %ROOT%/test.rego:6:
+    	{x | x := l[_]} == {"b"}
+    	|
+    	{"a"}
+
+SUMMARY
+--------------------------------------------------------------------------------
+%ROOT%/test.rego:
+data.test.test_foo: FAIL (%TIME%)
+--------------------------------------------------------------------------------
+FAIL: 1/1
+`,
+		},
+		{
+			note: "comprehension (object)",
+			files: map[string]string{
+				"/test.rego": `package test
+import rego.v1
+
+test_foo if {
+	l := ["a", "b", "c"]
+	{k: x | x := l[k]} == {3: "d", 4: "e", 5: "f"}
+}
+`,
+			},
+			expected: `FAILURES
+--------------------------------------------------------------------------------
+data.test.test_foo: FAIL (%TIME%)
+
+  %ROOT%/test.rego:6:
+    	{k: x | x := l[k]} == {3: "d", 4: "e", 5: "f"}
+    	|
+    	{0: "a", 1: "b", 2: "c"}
+
+SUMMARY
+--------------------------------------------------------------------------------
+%ROOT%/test.rego:
+data.test.test_foo: FAIL (%TIME%)
+--------------------------------------------------------------------------------
+FAIL: 1/1
+`,
+		},
+		{
+			note: "every",
+			files: map[string]string{
+				"/test.rego": `package test
+import rego.v1
+
+test_foo if {
+	l := [1, 2, 3]
+	every x in l {
+		x == 1 
+	}
+}`,
+			},
+			expected: `FAILURES
+--------------------------------------------------------------------------------
+data.test.test_foo: FAIL (%TIME%)
+
+  %ROOT%/test.rego:7:
+    		x == 1
+    		|
+    		2
+
+SUMMARY
+--------------------------------------------------------------------------------
+%ROOT%/test.rego:
+data.test.test_foo: FAIL (%TIME%)
+--------------------------------------------------------------------------------
+FAIL: 1/1
+`,
+		},
+		{
+			note: "comprehension inside every",
+			files: map[string]string{
+				"/test.rego": `package test
+import rego.v1
+
+test_foo if {
+	l := [1, 2, 3]
+	every x in l {
+		[v | v := x] == [42]
+	}
+}`,
+			},
+			expected: `FAILURES
+--------------------------------------------------------------------------------
+data.test.test_foo: FAIL (%TIME%)
+
+  %ROOT%/test.rego:7:
+    		[v | v := x] == [42]
+    		|
+    		[1]
+
+SUMMARY
+--------------------------------------------------------------------------------
+%ROOT%/test.rego:
+data.test.test_foo: FAIL (%TIME%)
+--------------------------------------------------------------------------------
+FAIL: 1/1
+`,
+		},
+		{
+			note: "nested every",
+			files: map[string]string{
+				"/test.rego": `package test
+import rego.v1
+
+test_foo if {
+	l := [[1, 2], [3, 4], [5, 6]]
+	every x in l {
+		every y in x {
+			y < 4
+		}
+	}
+}`,
+			},
+			expected: `FAILURES
+--------------------------------------------------------------------------------
+data.test.test_foo: FAIL (%TIME%)
+
+  %ROOT%/test.rego:8:
+    			y < 4
+    			|
+    			4
+
+SUMMARY
+--------------------------------------------------------------------------------
+%ROOT%/test.rego:
+data.test.test_foo: FAIL (%TIME%)
+--------------------------------------------------------------------------------
+FAIL: 1/1
+`,
+		},
+		{
+			note: "nested every with comprehension",
+			files: map[string]string{
+				"/test.rego": `package test
+import rego.v1
+
+test_foo if {
+	l := [[1, 2], [3, 4], [5, 6]]
+	every x in l {
+		every y in x {
+			[v | v := y] == [42]
+		}
+	}
+}`,
+			},
+			expected: `FAILURES
+--------------------------------------------------------------------------------
+data.test.test_foo: FAIL (%TIME%)
+
+  %ROOT%/test.rego:8:
+    			[v | v := y] == [42]
+    			|
+    			[1]
+
+SUMMARY
+--------------------------------------------------------------------------------
+%ROOT%/test.rego:
+data.test.test_foo: FAIL (%TIME%)
+--------------------------------------------------------------------------------
+FAIL: 1/1
+`,
+		},
+		{
+			note: "ref equality",
+			files: map[string]string{
+				"/test.rego": `package test
+import rego.v1
+
+a := 1
+b := 2
+
+test_foo if {
+	a == b
+}`,
+			},
+			expected: `FAILURES
+--------------------------------------------------------------------------------
+data.test.test_foo: FAIL (%TIME%)
+
+  %ROOT%/test.rego:8:
+    	a == b
+    	|    |
+    	|    2
+    	1
+
+SUMMARY
+--------------------------------------------------------------------------------
+%ROOT%/test.rego:
+data.test.test_foo: FAIL (%TIME%)
+--------------------------------------------------------------------------------
+FAIL: 1/1
+`,
+		},
+		{
+			note: "ref equality (data)",
+			files: map[string]string{
+				"/test.rego": `package test
+import rego.v1
+
+test_foo if {
+	data.a == data.b
+}`,
+				"data.json": `{"a": 1, "b": 2}`,
+			},
+			expected: `FAILURES
+--------------------------------------------------------------------------------
+data.test.test_foo: FAIL (%TIME%)
+
+  %ROOT%/test.rego:5:
+    	data.a == data.b
+    	|         |
+    	|         2
+    	1
+
+SUMMARY
+--------------------------------------------------------------------------------
+%ROOT%/test.rego:
+data.test.test_foo: FAIL (%TIME%)
+--------------------------------------------------------------------------------
+FAIL: 1/1
+`,
+		},
+		{
+			note: "with, containing local vars",
+			files: map[string]string{
+				"/test.rego": `package test
+import rego.v1
+
+p := input.x
+
+test_p if {
+	a := 1
+	p == 2 with input.x as a
+}`,
+			},
+			expected: `FAILURES
+--------------------------------------------------------------------------------
+data.test.test_p: FAIL (%TIME%)
+
+  %ROOT%/test.rego:8:
+    	p == 2 with input.x as a
+    	|                      |
+    	|                      1
+    	1
+
+SUMMARY
+--------------------------------------------------------------------------------
+%ROOT%/test.rego:
+data.test.test_p: FAIL (%TIME%)
+--------------------------------------------------------------------------------
+FAIL: 1/1
+`,
+		},
+		{
+			note: "with, containing ref",
+			files: map[string]string{
+				"/test.rego": `package test
+import rego.v1
+
+p := input.x
+
+testInput := {"x": 1}
+
+test_p if {
+	p == 2 with input as testInput
+}`,
+			},
+			expected: `FAILURES
+--------------------------------------------------------------------------------
+data.test.test_p: FAIL (%TIME%)
+
+  %ROOT%/test.rego:9:
+    	p == 2 with input as testInput
+    	|                    |
+    	|                    {"x": 1}
+    	1
+
+SUMMARY
+--------------------------------------------------------------------------------
+%ROOT%/test.rego:
+data.test.test_p: FAIL (%TIME%)
+--------------------------------------------------------------------------------
+FAIL: 1/1
+`,
+		},
+		{
+			note: "negated rule ref",
+			files: map[string]string{
+				"/test.rego": `package test
+import rego.v1
+
+a if {true}
+
+test_foo if {
+	not a
+}`,
+				"data.json": `{"a": true}`,
+			},
+			expected: `FAILURES
+--------------------------------------------------------------------------------
+data.test.test_foo: FAIL (%TIME%)
+
+  %ROOT%/test.rego:7:
+    	not a
+    	    |
+    	    true
+
+SUMMARY
+--------------------------------------------------------------------------------
+%ROOT%/test.rego:
+data.test.test_foo: FAIL (%TIME%)
+--------------------------------------------------------------------------------
+FAIL: 1/1
+`,
+		},
+		{
+			note: "negated data ref",
+			files: map[string]string{
+				"/test.rego": `package test
+import rego.v1
+
+test_foo if {
+	not data.a
+}`,
+				"data.json": `{"a": true}`,
+			},
+			// Because of the negated expr, the compiler will have opted out of rewriting the expression to
+			// capture the value of data.a in a local variable, and since data.a isn't in the local bindings
+			// or in the virtual cache, we don't know if it's undefined or unknown, and therefore can't report
+			// on a value.
+			expected: `FAILURES
+--------------------------------------------------------------------------------
+data.test.test_foo: FAIL (%TIME%)
+
+  %ROOT%/test.rego:5:
+    	not data.a
+
+SUMMARY
+--------------------------------------------------------------------------------
+%ROOT%/test.rego:
+data.test.test_foo: FAIL (%TIME%)
+--------------------------------------------------------------------------------
+FAIL: 1/1
+`,
+		},
+	}
+
+	r := regexp.MustCompile(`FAIL \(.*s\)`)
+	for _, tc := range tests {
+		t.Run(tc.note, func(t *testing.T) {
+			test.WithTempFS(tc.files, func(root string) {
+				buf := new(bytes.Buffer)
+				testParams := newTestCommandParams()
+				testParams.count = 1
+				testParams.output = buf
+				testParams.errOutput = io.Discard
+				testParams.bundleMode = true
+				testParams.varValues = true
+				_ = testParams.explain.Set(explainModeFull)
+
+				_, err := opaTest([]string{root}, testParams)
+				if err != nil {
+					t.Fatalf("Unexpected error: %s", err)
+				}
+
+				actual := r.ReplaceAllString(buf.String(), "FAIL (%TIME%)")
+				expected := strings.ReplaceAll(tc.expected, "%ROOT%", root)
+
+				if !stringsMatch(t, expected, actual) {
+					t.Fatalf("Expected output to be:\n\n%s\n\ngot:\n\n%s", expected, actual)
+				}
+			})
+		})
+	}
 }
 
 // Assert that ignore flag is correctly used when the bundle flag is activated
@@ -436,7 +1754,7 @@ func TestWatchMode(t *testing.T) {
 	}
 
 	test.WithTempFS(files, func(root string) {
-		buf := blockingWriter{}
+		buf := test.BlockingWriter{}
 
 		testParams := newTestCommandParams()
 		testParams.output = &buf
@@ -537,7 +1855,7 @@ func TestWatchModeWithDataFile(t *testing.T) {
 	}
 
 	test.WithTempFS(files, func(root string) {
-		buf := blockingWriter{}
+		buf := test.BlockingWriter{}
 
 		testParams := newTestCommandParams()
 		testParams.output = &buf
@@ -617,7 +1935,7 @@ func TestWatchModeWhenDataFileRemoved(t *testing.T) {
 	}
 
 	test.WithTempFS(files, func(root string) {
-		buf := blockingWriter{}
+		buf := test.BlockingWriter{}
 
 		testParams := newTestCommandParams()
 		testParams.output = &buf
@@ -735,7 +2053,7 @@ Watching for changes ...`,
 	for _, tc := range tests {
 		t.Run(tc.note, func(t *testing.T) {
 			test.WithTempFS(files, func(root string) {
-				buf := blockingWriter{}
+				buf := test.BlockingWriter{}
 
 				testParams := newTestCommandParams()
 				testParams.output = &buf
@@ -1012,25 +2330,536 @@ Lines not covered:
 	}
 }
 
-type blockingWriter struct {
-	m   sync.Mutex
-	buf bytes.Buffer
+type loadType int
+
+const (
+	loadFile loadType = iota
+	loadBundle
+	loadTarball
+)
+
+func (t loadType) String() string {
+	return [...]string{"file", "bundle", "bundle tarball"}[t]
 }
 
-func (w *blockingWriter) Write(p []byte) (n int, err error) {
-	w.m.Lock()
-	defer w.m.Unlock()
-	return w.buf.Write(p)
+func TestWithV1CompatibleFlag(t *testing.T) {
+	tests := []struct {
+		note         string
+		v1Compatible bool
+		files        map[string]string
+		expErr       string
+	}{
+		{
+			note: "0.x module, no imports",
+			files: map[string]string{
+				"/test.rego": `package test
+
+l1 := {1, 3, 5}
+l2 contains v if {
+	v := l1[_]
 }
 
-func (w *blockingWriter) String() string {
-	w.m.Lock()
-	defer w.m.Unlock()
-	return w.buf.String()
+test_l if {
+	l1 == l2
+}`,
+			},
+			expErr: "rego_parse_error",
+		},
+		{
+			note: "0.x module, rego.v1 imported",
+			files: map[string]string{
+				"/test.rego": `package test
+
+import rego.v1
+
+l1 := {1, 3, 5}
+l2 contains v if {
+	v := l1[_]
 }
 
-func (w *blockingWriter) Reset() {
-	w.m.Lock()
-	defer w.m.Unlock()
-	w.buf.Reset()
+test_l if {
+	l1 == l2
+}`,
+			},
+		},
+		{
+			note: "0.x module, future.keywords imported",
+			files: map[string]string{
+				"/test.rego": `package test
+
+import future.keywords
+
+l1 := {1, 3, 5}
+l2 contains v if {
+	v := l1[_]
+}
+
+test_l if {
+	l1 == l2
+}`,
+			},
+		},
+
+		{
+			note:         "1.0 compatible module, no imports",
+			v1Compatible: true,
+			files: map[string]string{
+				"/test.rego": `package test
+
+l1 := {1, 3, 5}
+l2 contains v if {
+	v := l1[_]
+}
+
+test_l if {
+	l1 == l2
+}`,
+			},
+		},
+		{
+			note:         "1.0 compatible module, rego.v1 imported",
+			v1Compatible: true,
+			files: map[string]string{
+				"/test.rego": `package test
+
+import rego.v1
+
+l1 := {1, 3, 5}
+l2 contains v if {
+	v := l1[_]
+}
+
+test_l if {
+	l1 == l2
+}`,
+			},
+		},
+		{
+			note:         "1.0 compatible module, future.keywords imported",
+			v1Compatible: true,
+			files: map[string]string{
+				"/test.rego": `package test
+
+import future.keywords
+
+l1 := {1, 3, 5}
+l2 contains v if {
+	v := l1[_]
+}
+
+test_l if {
+	l1 == l2
+}`,
+			},
+		},
+	}
+
+	loadTypes := []loadType{loadFile, loadBundle, loadTarball}
+
+	for _, tc := range tests {
+		for _, loadType := range loadTypes {
+			t.Run(fmt.Sprintf("%s (%s)", tc.note, loadType), func(t *testing.T) {
+				var files map[string]string
+				if loadType != loadTarball {
+					files = tc.files
+				}
+				test.WithTempFS(files, func(root string) {
+					if loadType == loadTarball {
+						f, err := os.Create(filepath.Join(root, "bundle.tar.gz"))
+						if err != nil {
+							t.Fatal(err)
+						}
+
+						testBundle := bundle.Bundle{
+							Data: map[string]interface{}{},
+						}
+						for k, v := range tc.files {
+							testBundle.Modules = append(testBundle.Modules, bundle.ModuleFile{
+								Path: k,
+								Raw:  []byte(v),
+							})
+						}
+
+						if err := bundle.Write(f, testBundle); err != nil {
+							t.Fatal(err)
+						}
+					}
+
+					var buf bytes.Buffer
+					var errBuf bytes.Buffer
+
+					testParams := newTestCommandParams()
+					testParams.v1Compatible = tc.v1Compatible
+					testParams.bundleMode = loadType == loadBundle
+					testParams.count = 1
+					testParams.output = &buf
+					testParams.errOutput = &errBuf
+
+					var paths []string
+					if loadType == loadTarball {
+						paths = []string{filepath.Join(root, "bundle.tar.gz")}
+					} else {
+						paths = []string{root}
+					}
+
+					exitCode, _ := opaTest(paths, testParams)
+					if tc.expErr != "" {
+						if exitCode == 0 {
+							t.Fatalf("expected non-zero exit code")
+						}
+
+						if actual := errBuf.String(); !strings.Contains(actual, tc.expErr) {
+							t.Fatalf("expected error output to contain:\n\n%q\n\nbut got:\n\n%q", tc.expErr, actual)
+						}
+					} else {
+						if exitCode != 0 {
+							t.Fatalf("unexpected exit code: %d", exitCode)
+						}
+
+						if errBuf.Len() > 0 {
+							t.Fatalf("expected no error output but got:\n\n%q", buf.String())
+						}
+
+						expected := "PASS: 1/1"
+						if actual := buf.String(); !strings.Contains(actual, expected) {
+							t.Fatalf("expected output to contain:\n\n%s\n\nbut got:\n\n%q", expected, actual)
+						}
+					}
+				})
+			})
+		}
+	}
+}
+
+func TestWithBundleRegoVersion(t *testing.T) {
+	tests := []struct {
+		note   string
+		files  map[string]string
+		expErr string
+	}{
+		{
+			note: "v0.x bundle, no imports",
+			files: map[string]string{
+				".manifest": `{"rego_version": 0}`,
+				"policy.rego": `package test
+
+l1 := {1, 3, 5}
+l2 contains v if {
+	v := l1[_]
+}
+
+test_l if {
+	l1 == l2
+}`,
+			},
+			expErr: "rego_parse_error",
+		},
+		{
+			note: "v0.x bundle, rego.v1 imported",
+			files: map[string]string{
+				".manifest": `{"rego_version": 0}`,
+				"policy.rego": `package test
+
+import rego.v1
+
+l1 := {1, 3, 5}
+l2 contains v if {
+	v := l1[_]
+}
+
+test_l if {
+	l1 == l2
+}`,
+			},
+		},
+		{
+			note: "v0.x bundle, future.keywords imported",
+			files: map[string]string{
+				".manifest": `{"rego_version": 0}`,
+				"policy.rego": `package test
+
+import future.keywords
+
+l1 := {1, 3, 5}
+l2 contains v if {
+	v := l1[_]
+}
+
+test_l if {
+	l1 == l2
+}`,
+			},
+		},
+		{
+			note: "v0 bundle, v1 per-file override",
+			files: map[string]string{
+				".manifest": `{
+	"rego_version": 0,
+	"file_rego_versions": {
+		"/policy2.rego": 1
+	}
+}`,
+				"policy1.rego": `package test
+l1 := {1, 3, 5}
+l2[v] {
+	v := l1[_]
+}`,
+				"policy2.rego": `package test
+test_l if {
+	l1 == l2
+}`,
+			},
+		},
+		{
+			note: "v0 bundle, v1 per-file override (glob)",
+			files: map[string]string{
+				".manifest": `{
+	"rego_version": 0,
+	"file_rego_versions": {
+		"*/policy2.rego": 1
+	}
+}`,
+				"policy1.rego": `package test
+l1 := {1, 3, 5}
+l2[v] {
+	v := l1[_]
+}`,
+				"policy2.rego": `package test
+test_l if {
+	l1 == l2
+}`,
+			},
+		},
+		{
+			note: "v0 bundle, v1 per-file override, incompatible",
+			files: map[string]string{
+				".manifest": `{
+	"rego_version": 0,
+	"file_rego_versions": {
+		"/policy2.rego": 1
+	}
+}`,
+				"policy1.rego": `package test
+l1 := {1, 3, 5}
+l2[v] {
+	v := l1[_]
+}`,
+				"policy2.rego": `package test
+test_l {
+	l1 == l2
+}`,
+			},
+			expErr: "rego_parse_error",
+		},
+
+		{
+			note: "v1.0 bundle, no imports",
+			files: map[string]string{
+				".manifest": `{"rego_version": 1}`,
+				"policy.rego": `package test
+
+l1 := {1, 3, 5}
+l2 contains v if {
+	v := l1[_]
+}
+
+test_l if {
+	l1 == l2
+}`,
+			},
+		},
+		{
+			note: "v1.0 bundle, rego.v1 imported",
+			files: map[string]string{
+				".manifest": `{"rego_version": 1}`,
+				"policy.rego": `package test
+
+import rego.v1
+
+l1 := {1, 3, 5}
+l2 contains v if {
+	v := l1[_]
+}
+
+test_l if {
+	l1 == l2
+}`,
+			},
+		},
+		{
+			note: "v1.0 bundle, future.keywords imported",
+			files: map[string]string{
+				".manifest": `{"rego_version": 1}`,
+				"policy.rego": `package test
+
+import future.keywords
+
+l1 := {1, 3, 5}
+l2 contains v if {
+	v := l1[_]
+}
+
+test_l if {
+	l1 == l2
+}`,
+			},
+		},
+		{
+			note: "v1 bundle, v0 per-file override",
+			files: map[string]string{
+				".manifest": `{
+	"rego_version": 1,
+	"file_rego_versions": {
+		"/policy1.rego": 0
+	}
+}`,
+				"policy1.rego": `package test
+l1 := {1, 3, 5}
+l2[v] {
+	v := l1[_]
+}`,
+				"policy2.rego": `package test
+test_l if {
+	l1 == l2
+}`,
+			},
+		},
+		{
+			note: "v1 bundle, v0 per-file override (glob)",
+			files: map[string]string{
+				".manifest": `{
+	"rego_version": 1,
+	"file_rego_versions": {
+		"*/policy1.rego": 0
+	}
+}`,
+				"policy1.rego": `package test
+l1 := {1, 3, 5}
+l2[v] {
+	v := l1[_]
+}`,
+				"policy2.rego": `package test
+test_l if {
+	l1 == l2
+}`,
+			},
+		},
+		{
+			note: "v1 bundle, v0 per-file override, incompatible",
+			files: map[string]string{
+				".manifest": `{
+	"rego_version": 1,
+	"file_rego_versions": {
+		"/policy1.rego": 0
+	}
+}`,
+				"policy1.rego": `package test
+l1 := {1, 3, 5}
+l2 contains v if {
+	v := l1[_]
+}`,
+				"policy2.rego": `package test
+test_l if {
+	l1 == l2
+}`,
+			},
+			expErr: "rego_parse_error",
+		},
+	}
+
+	bundleTypeCases := []struct {
+		note string
+		tar  bool
+	}{
+		{
+			"bundle dir", false,
+		},
+		{
+			"bundle tar", true,
+		},
+	}
+
+	v1CompatibleFlagCases := []struct {
+		note string
+		used bool
+	}{
+		{
+			"no --v1-compatible", false,
+		},
+		{
+			"--v1-compatible", true,
+		},
+	}
+
+	for _, bundleType := range bundleTypeCases {
+		for _, v1CompatibleFlag := range v1CompatibleFlagCases {
+			for _, tc := range tests {
+
+				t.Run(fmt.Sprintf("%s, %s, %s", bundleType.note, v1CompatibleFlag.note, tc.note), func(t *testing.T) {
+					files := map[string]string{}
+					if bundleType.tar {
+						files["bundle.tar.gz"] = ""
+					} else {
+						for k, v := range tc.files {
+							files[k] = v
+						}
+					}
+
+					test.WithTempFS(files, func(root string) {
+						p := root
+						if bundleType.tar {
+							p = filepath.Join(root, "bundle.tar.gz")
+							files := make([][2]string, 0, len(tc.files))
+							for k, v := range tc.files {
+								files = append(files, [2]string{k, v})
+							}
+							buf := archive.MustWriteTarGz(files)
+							bf, err := os.Create(p)
+							if err != nil {
+								t.Fatalf("Unexpected error: %v", err)
+							}
+							_, err = bf.Write(buf.Bytes())
+							if err != nil {
+								t.Fatalf("Unexpected error: %v", err)
+							}
+						}
+
+						var buf bytes.Buffer
+						var errBuf bytes.Buffer
+
+						testParams := newTestCommandParams()
+						testParams.v1Compatible = v1CompatibleFlag.used
+						testParams.bundleMode = true
+						testParams.count = 1
+						testParams.output = &buf
+						testParams.errOutput = &errBuf
+
+						exitCode, _ := opaTest([]string{p}, testParams)
+						if tc.expErr != "" {
+							if exitCode == 0 {
+								t.Fatalf("expected non-zero exit code")
+							}
+
+							if actual := errBuf.String(); !strings.Contains(actual, tc.expErr) {
+								t.Fatalf("expected error output to contain:\n\n%q\n\nbut got:\n\n%q", tc.expErr, actual)
+							}
+						} else {
+							if exitCode != 0 {
+								t.Fatalf("unexpected exit code: %d", exitCode)
+							}
+
+							if errBuf.Len() > 0 {
+								t.Fatalf("expected no error output but got:\n\n%q", buf.String())
+							}
+
+							expected := "PASS: 1/1"
+							if actual := buf.String(); !strings.Contains(actual, expected) {
+								t.Fatalf("expected output to contain:\n\n%s\n\nbut got:\n\n%q", expected, actual)
+							}
+						}
+					})
+				})
+			}
+		}
+	}
 }

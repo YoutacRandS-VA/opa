@@ -8,6 +8,8 @@
 
 #include <unordered_map>
 
+static const int MAX_CACHE_SIZE = 100;
+
 typedef std::unordered_map<std::string, re2::RE2*> re_cache;
 
 OPA_BUILTIN
@@ -61,6 +63,16 @@ static re2::RE2* compile(const char *pattern)
 // reuse returns the precompiled pattern to the cache.
 static void reuse(re2::RE2 *re)
 {
+	if (cache()->size() >= MAX_CACHE_SIZE)
+	{
+		// Delete a (semi-)random key to make room for the new one.
+		auto i = cache()->begin();
+		if (i != cache()->end())
+		{
+			delete i->second;
+			cache()->erase(i);
+		}
+	}
     cache()->insert(std::make_pair(re->pattern(), re));
 }
 
@@ -108,20 +120,21 @@ opa_value *opa_regex_find_all_string_submatch(opa_value *pattern, opa_value *val
         return NULL;
     }
 
-    opa_string_t *s = opa_cast_string(value);
+    std::string val(opa_cast_string(value)->v, opa_cast_string(value)->len);
     opa_array_t *result = opa_cast_array(opa_array());
     int nsubmatch = re->NumberOfCapturingGroups() + 1;
     re2::StringPiece submatches[nsubmatch];
 
     // The following is effectively refactored RE2::GlobalReplace:
 
-    const char* p = s->v;
-    const char* ep = p + s->len;
+    const char* beginpos = val.c_str();
+    const char* p = beginpos;
+    const char* ep = p + val.size();
     const char* lastend = NULL;
     int pos = 0;
 
     while (p <= ep && (num_results == -1 || result->len < num_results)) {
-        if (!re->Match(s->v, static_cast<size_t>(p - s->v), s->len, re2::RE2::UNANCHORED, submatches, nsubmatch))
+        if (!re->Match(val, static_cast<size_t>(p - beginpos), val.size(), re2::RE2::UNANCHORED, submatches, nsubmatch))
         {
             break;
         }

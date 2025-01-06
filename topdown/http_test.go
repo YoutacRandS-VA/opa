@@ -53,7 +53,7 @@ func TestHTTPGetRequest(t *testing.T) {
 	people = append(people, Person{ID: "1", Firstname: "John"})
 
 	// test server
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		headers := w.Header()
 		headers["test-header"] = []string{"test-value"}
 		w.WriteHeader(http.StatusOK)
@@ -107,7 +107,7 @@ func TestHTTPGetRequestTlsInsecureSkipVerify(t *testing.T) {
 	people = append(people, Person{ID: "1", Firstname: "John"})
 
 	// test server
-	ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_ = json.NewEncoder(w).Encode(people)
 	}))
@@ -848,6 +848,16 @@ func TestHTTPSendRaiseError(t *testing.T) {
 
 	response := ast.MustInterfaceToValue(responseObj)
 
+	inputValidationErrObj := make(map[string]interface{})
+	inputValidationErrObj["code"] = HTTPSendInternalErr
+	inputValidationErrObj["message"] = fmt.Sprintf(`http.send({"url": "%s", "raise_error": false}): eval_type_error: http.send: operand 1 missing required request parameters(s): {"method"}`, baseURL)
+
+	responseObjInputValidationErr := make(map[string]interface{})
+	responseObjInputValidationErr["status_code"] = 0
+	responseObjInputValidationErr["error"] = inputValidationErrObj
+
+	responseObjInputValidation := ast.MustInterfaceToValue(responseObjInputValidationErr)
+
 	tests := []struct {
 		note         string
 		ruleTemplate string
@@ -887,12 +897,31 @@ func TestHTTPSendRaiseError(t *testing.T) {
 			response: internalErr.String(),
 		},
 		{
-			note: "http.send missing param (don't raise error,  check response)",
+			note: "http.send missing param (don't raise error, check response)",
 			ruleTemplate: `p = x {
 									r = http.send({"method": "get", "url": "%URL%", "force_json_decode": true, "raise_error": false, "force_cache": true})
 									x = r
 								}`,
 			response: response.String(),
+		},
+		{
+			note: "http.send missing required input param (don't raise error, check response)",
+			ruleTemplate: `p = x {
+									r = http.send({"url": "%URL%", "raise_error": false})
+									x = r
+								}`,
+			response: responseObjInputValidation.String(),
+		},
+		{
+			note: "http.send missing required input param (raise error, undefined response)",
+			ruleTemplate: `p = x {
+									r = http.send({"url": "%URL%", "raise_error": true})
+									x = r
+								}`,
+			response: &Error{
+				Code:    TypeErr,
+				Message: "eval_type_error: http.send: operand 1 missing required request parameters(s): {\"method\"}",
+			},
 		},
 	}
 
@@ -982,6 +1011,76 @@ func TestHTTPSendCaching(t *testing.T) {
 								}`,
 			response:         `{"x": 1}`,
 			expectedReqCount: 3,
+		},
+		{
+			note: "http.send GET different headers but still cached because ignored",
+			ruleTemplate: `p = x {
+									r1 = http.send({"method": "get", "url": "%URL%", "force_json_decode": true, "headers": {"h1": "v1", "h2": "v2"}, "cache_ignored_headers": ["h2"]})
+									r2 = http.send({"method": "get", "url": "%URL%", "force_json_decode": true, "headers": {"h1": "v1", "h2": "v3"}, "cache_ignored_headers": ["h2"]}) # cached
+									x = r1.body
+								}`,
+			response:         `{"x": 1}`,
+			expectedReqCount: 1,
+		},
+		{
+			note: "http.send GET cache miss different headers (force_cache enabled)",
+			ruleTemplate: `p = x {
+									r1 = http.send({"method": "get", "url": "%URL%", "force_json_decode": true, "headers": {"h1": "v1", "h2": "v2"}, "force_cache": true, "force_cache_duration_seconds": 300})
+									r2 = http.send({"method": "get", "url": "%URL%", "force_json_decode": true, "headers": {"h1": "v1", "h2": "v3"}, "force_cache": true, "force_cache_duration_seconds": 300})
+									x = r1.body
+								}`,
+			response:         `{"x": 1}`,
+			expectedReqCount: 2,
+		},
+		{
+			note: "http.send GET cache miss different headers in cache key",
+			ruleTemplate: `p = x {
+									r1 = http.send({"method": "get", "url": "%URL%", "force_json_decode": true, "headers": {"h1": "v1", "h2": "v2", "h3": "v3"}, "cache_ignored_headers": ["h2"]})
+									r2 = http.send({"method": "get", "url": "%URL%", "force_json_decode": true, "headers": {"h1": "v1", "h2": "v21"}, "cache_ignored_headers": ["h2"]})
+									x = r1.body
+								}`,
+			response:         `{"x": 1}`,
+			expectedReqCount: 2,
+		},
+		{
+			note: "http.send GET different headers but still cached because ignored (force_cache enabled)",
+			ruleTemplate: `p = x {
+									r1 = http.send({"method": "get", "url": "%URL%", "force_json_decode": true, "headers": {"h1": "v1", "h2": "v2"}, "force_cache": true, "force_cache_duration_seconds": 300, "cache_ignored_headers": ["h2"]})
+									r2 = http.send({"method": "get", "url": "%URL%", "force_json_decode": true, "headers": {"h1": "v1", "h2": "v3"}, "force_cache": true, "force_cache_duration_seconds": 300, "cache_ignored_headers": ["h2"]}) # cached
+									x = r1.body
+								}`,
+			response:         `{"x": 1}`,
+			expectedReqCount: 1,
+		},
+		{
+			note: "http.send GET different cache_ignored_headers but still cached (force_cache enabled)",
+			ruleTemplate: `p = x {
+									r1 = http.send({"method": "get", "url": "%URL%", "force_json_decode": true, "headers": {"h1": "v1", "h2": "v2"}, "force_cache": true, "force_cache_duration_seconds": 300, "cache_ignored_headers": ["h2"]})
+									r2 = http.send({"method": "get", "url": "%URL%", "force_json_decode": true, "headers": {"h1": "v1", "h2": "v2", "h3": "v3"}, "force_cache": true, "force_cache_duration_seconds": 300, "cache_ignored_headers": ["h2", "h3"]}) # cached
+									x = r1.body
+								}`,
+			response:         `{"x": 1}`,
+			expectedReqCount: 1,
+		},
+		{
+			note: "http.send GET different cache_ignored_headers (one of them is nil) but still cached (force_cache enabled)",
+			ruleTemplate: `p = x {
+									r1 = http.send({"method": "get", "url": "%URL%", "force_json_decode": true, "headers": {"h1": "v1"}, "force_cache": true, "force_cache_duration_seconds": 300})
+									r2 = http.send({"method": "get", "url": "%URL%", "force_json_decode": true, "headers": {"h1": "v1", "h2": "v2"}, "force_cache": true, "force_cache_duration_seconds": 300, "cache_ignored_headers": ["h2"]}) # cached
+									x = r1.body
+								}`,
+			response:         `{"x": 1}`,
+			expectedReqCount: 1,
+		},
+		{
+			note: "http.send GET different cache_ignored_headers (one of them is empty) but still cached (force_cache enabled)",
+			ruleTemplate: `p = x {
+									r1 = http.send({"method": "get", "url": "%URL%", "force_json_decode": true, "headers": {"h1": "v1"}, "force_cache": true, "force_cache_duration_seconds": 300, "cache_ignored_headers": []})
+									r2 = http.send({"method": "get", "url": "%URL%", "force_json_decode": true, "headers": {"h1": "v1", "h2": "v2"}, "force_cache": true, "force_cache_duration_seconds": 300, "cache_ignored_headers": ["h2"]}) # cached
+									x = r1.body
+								}`,
+			response:         `{"x": 1}`,
+			expectedReqCount: 1,
 		},
 		{
 			note: "http.send POST cache miss different body",
@@ -1129,8 +1228,8 @@ func TestHTTPSendIntraQueryCaching(t *testing.T) {
 			}))
 			defer ts.Close()
 
-			config, _ := iCache.ParseCachingConfig(nil)
-			interQueryCache := iCache.NewInterQueryCache(config)
+			config, _ := iCache.ParseCachingConfig([]byte(`{"inter_query_builtin_cache": {"max_size_bytes": 500, "stale_entry_eviction_period_seconds": 1, "forced_eviction_threshold_percentage": 80},}`))
+			interQueryCache := iCache.NewInterQueryCacheWithContext(context.Background(), config)
 
 			opts := []func(*Query) *Query{
 				setTime(t0),
@@ -1156,6 +1255,9 @@ func TestHTTPSendIntraQueryCaching(t *testing.T) {
 			if err != nil {
 				t.Fatalf("failed create request object: %v", err)
 			}
+			cacheKeyObj, _ := cacheKey.(ast.Object)
+			cacheKeyObj.Insert(ast.StringTerm("cache_ignored_headers"), ast.NullTerm())
+			cacheKey, _ = cacheKeyObj.(ast.Value)
 
 			if _, found := interQueryCache.Get(cacheKey); found != tc.expectedInterQueryCacheHit {
 				t.Fatalf("Expected inter-query cache hit: %v, got: %v", tc.expectedInterQueryCacheHit, found)
@@ -1538,8 +1640,8 @@ func TestHTTPSendInterQueryForceCachingRefresh(t *testing.T) {
 			request := strings.ReplaceAll(tc.request, "%URL%", ts.URL)
 			request = strings.ReplaceAll(request, "%CACHE%", strconv.Itoa(cacheTime))
 			full := fmt.Sprintf("http.send(%s, x)", request)
-			config, _ := iCache.ParseCachingConfig(nil)
-			interQueryCache := iCache.NewInterQueryCache(config)
+			config, _ := iCache.ParseCachingConfig([]byte(`{"inter_query_builtin_cache": {"max_size_bytes": 500, "stale_entry_eviction_period_seconds": 1, "forced_eviction_threshold_percentage": 80},}`))
+			interQueryCache := iCache.NewInterQueryCacheWithContext(context.Background(), config)
 			q := NewQuery(ast.MustParseBody(full)).
 				WithInterQueryBuiltinCache(interQueryCache).
 				WithTime(t0)
@@ -1574,6 +1676,9 @@ func TestHTTPSendInterQueryForceCachingRefresh(t *testing.T) {
 				if err != nil {
 					t.Fatalf("failed create request object on query %d: %v", i, err)
 				}
+				cacheKeyObj, _ := cacheKey.(ast.Object)
+				cacheKeyObj.Insert(ast.StringTerm("cache_ignored_headers"), ast.NullTerm())
+				cacheKey, _ = cacheKeyObj.(ast.Value)
 
 				val, found := interQueryCache.Get(cacheKey)
 				if !found {
@@ -1598,7 +1703,7 @@ func TestHTTPSendInterQueryForceCachingRefresh(t *testing.T) {
 					t.Fatal(err)
 				}
 
-				interQueryCache.Insert(cacheKey, v)
+				interQueryCache.InsertWithExpiry(cacheKey, v, m.ExpiresAt)
 			}
 
 			actualCount := len(requests)
@@ -1769,8 +1874,8 @@ func TestHTTPSendInterQueryCachingNewResp(t *testing.T) {
 }
 
 func newQuery(qStr string, t0 time.Time) *Query {
-	config, _ := iCache.ParseCachingConfig(nil)
-	interQueryCache := iCache.NewInterQueryCache(config)
+	config, _ := iCache.ParseCachingConfig([]byte(`{"inter_query_builtin_cache": {"max_size_bytes": 500, "stale_entry_eviction_period_seconds": 1, "forced_eviction_threshold_percentage": 80},}`))
+	interQueryCache := iCache.NewInterQueryCacheWithContext(context.Background(), config)
 	ctx := context.Background()
 	store := inmem.New()
 	txn := storage.NewTransactionOrDie(ctx, store)
@@ -2128,7 +2233,7 @@ func TestInterQueryCheckCacheError(t *testing.T) {
 	input := ast.MustParseTerm(`{"force_cache": true}`)
 	inputObj := input.Value.(ast.Object)
 
-	_, err := newHTTPRequestExecutor(BuiltinContext{Context: context.Background()}, inputObj)
+	_, err := newHTTPRequestExecutor(BuiltinContext{Context: context.Background()}, inputObj, inputObj)
 	if err == nil {
 		t.Fatal("expected error but got nil")
 	}
@@ -2159,7 +2264,7 @@ func TestNewInterQueryCacheValue(t *testing.T) {
 		Body:       io.NopCloser(bytes.NewBuffer(b)),
 	}
 
-	result, err := newInterQueryCacheValue(BuiltinContext{}, response, b, &forceCacheParams{})
+	result, _, err := newInterQueryCacheValue(BuiltinContext{}, response, b, &forceCacheParams{})
 	if err != nil {
 		t.Fatalf("Unexpected error %v", err)
 	}
@@ -2194,7 +2299,7 @@ func getTestServer() (baseURL string, teardownFn func()) {
 	mux := http.NewServeMux()
 	ts := httptest.NewServer(mux)
 
-	mux.HandleFunc("/test", func(w http.ResponseWriter, req *http.Request) {
+	mux.HandleFunc("/test", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
 
@@ -2209,7 +2314,7 @@ func getTLSTestServer() (ts *httptest.Server) {
 	mux := http.NewServeMux()
 	ts = httptest.NewUnstartedServer(mux)
 
-	mux.HandleFunc("/test", func(w http.ResponseWriter, req *http.Request) {
+	mux.HandleFunc("/test", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
 
@@ -2226,7 +2331,7 @@ func getTLSTestServer() (ts *httptest.Server) {
 		_, _ = w.Write(js)
 	})
 
-	mux.HandleFunc("/", func(w http.ResponseWriter, req *http.Request) {
+	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
 
@@ -2934,8 +3039,8 @@ func TestHTTPSendCacheDefaultStatusCodesInterQueryCache(t *testing.T) {
 	t.Run("non-cacheable status code: inter-query cache", func(t *testing.T) {
 
 		// add an inter-query cache
-		config, _ := iCache.ParseCachingConfig(nil)
-		interQueryCache := iCache.NewInterQueryCache(config)
+		config, _ := iCache.ParseCachingConfig([]byte(`{"inter_query_builtin_cache": {"max_size_bytes": 500, "stale_entry_eviction_period_seconds": 1, "forced_eviction_threshold_percentage": 80},}`))
+		interQueryCache := iCache.NewInterQueryCacheWithContext(context.Background(), config)
 
 		m := metrics.New()
 
@@ -2989,6 +3094,10 @@ func (c *onlyOnceInterQueryCache) Get(_ ast.Value) (value iCache.InterQueryCache
 }
 
 func (c *onlyOnceInterQueryCache) Insert(_ ast.Value, _ iCache.InterQueryCacheValue) int {
+	return 0
+}
+
+func (c *onlyOnceInterQueryCache) InsertWithExpiry(_ ast.Value, _ iCache.InterQueryCacheValue, _ time.Time) int {
 	return 0
 }
 
@@ -3252,7 +3361,7 @@ func getAllRequests(ch chan *http.Request) []*http.Request {
 
 func TestHTTPSendMetrics(t *testing.T) {
 	// run test server
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
 
@@ -3274,8 +3383,8 @@ func TestHTTPSendMetrics(t *testing.T) {
 
 	t.Run("cache hits", func(t *testing.T) {
 		// add an inter-query cache
-		config, _ := iCache.ParseCachingConfig(nil)
-		interQueryCache := iCache.NewInterQueryCache(config)
+		config, _ := iCache.ParseCachingConfig([]byte(`{"inter_query_builtin_cache": {"max_size_bytes": 500, "stale_entry_eviction_period_seconds": 1, "forced_eviction_threshold_percentage": 80},}`))
+		interQueryCache := iCache.NewInterQueryCacheWithContext(context.Background(), config)
 
 		// Execute query twice and verify http.send inter-query cache hit metric is incremented.
 		m := metrics.New()
@@ -3456,7 +3565,7 @@ func TestHTTPGetRequestAllowNet(t *testing.T) {
 	body := map[string]bool{"ok": true}
 
 	// test server
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_ = json.NewEncoder(w).Encode(body)
 	}))

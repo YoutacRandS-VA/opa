@@ -111,6 +111,391 @@ func TestPluginOneShot(t *testing.T) {
 	}
 }
 
+func TestPluginOneShotV1Compatible(t *testing.T) {
+	// Note: modules are parsed before passed to plugin, so any expected errors must be triggered by the compiler stage.
+	tests := []struct {
+		note         string
+		v1Compatible bool
+		module       string
+		expErrs      []string
+	}{
+		{
+			note: "v0.x",
+			module: `package foo
+import future.keywords
+corge contains 1 if {
+	input.x == 2
+}`,
+		},
+		{
+			note: "v0.x, shadowed import (no error)",
+			module: `package foo
+import future.keywords
+import data.foo
+import data.bar as foo
+corge contains 1 if {
+	input.x == 2
+}`,
+		},
+		{
+			note:         "v1.0",
+			v1Compatible: true,
+			module: `package foo
+corge contains 1 if {
+	input.x == 2
+}`,
+		},
+		{
+			note:         "v1.0, shadowed import",
+			v1Compatible: true,
+			module: `package foo
+import data.foo
+import data.bar as foo
+corge contains 1 if {
+	input.x == 2
+}`,
+			expErrs: []string{
+				"rego_compile_error: import must not shadow import data.foo",
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.note, func(t *testing.T) {
+			regoVersion := ast.RegoV0
+			if tc.v1Compatible {
+				regoVersion = ast.RegoV1
+			}
+			popts := ast.ParserOptions{RegoVersion: regoVersion}
+
+			ctx := context.Background()
+			manager := getTestManager()
+			plugin := New(&Config{}, manager)
+			bundleName := "test-bundle"
+			plugin.status[bundleName] = &Status{Name: bundleName, Metrics: metrics.New()}
+			plugin.downloaders[bundleName] = download.New(download.Config{}, plugin.manager.Client(""), bundleName)
+
+			ensurePluginState(t, plugin, plugins.StateNotReady)
+
+			b := bundle.Bundle{
+				Manifest: bundle.Manifest{Revision: "quickbrownfaux"},
+				Data:     map[string]interface{}{},
+				Modules: []bundle.ModuleFile{
+					{
+						Path:   "/foo/bar",
+						Parsed: ast.MustParseModuleWithOpts(tc.module, popts),
+						Raw:    []byte(tc.module),
+					},
+				},
+				Etag: "foo",
+			}
+
+			b.Manifest.Init()
+
+			plugin.oneShot(ctx, bundleName, download.Update{Bundle: &b, Metrics: metrics.New(), Size: snapshotBundleSize})
+
+			if tc.expErrs != nil {
+				ensurePluginState(t, plugin, plugins.StateNotReady)
+
+				if status, ok := plugin.status[bundleName]; !ok {
+					t.Fatalf("Expected to find status for %s, found nil", bundleName)
+				} else if status.Type != bundle.SnapshotBundleType {
+					t.Fatalf("expected snapshot bundle but got %v", status.Type)
+				} else if errs := status.Errors; len(errs) != len(tc.expErrs) {
+					t.Fatalf("expected errors:\n\n%v\n\nbut got:\n\n%v", tc.expErrs, errs)
+				} else {
+					for _, expErr := range tc.expErrs {
+						found := false
+						for _, err := range errs {
+							if strings.Contains(err.Error(), expErr) {
+								found = true
+								break
+							}
+						}
+						if !found {
+							t.Fatalf("expected error:\n\n%v\n\nbut got:\n\n%v", expErr, errs)
+						}
+					}
+				}
+			} else {
+				ensurePluginState(t, plugin, plugins.StateOK)
+
+				if status, ok := plugin.status[bundleName]; !ok {
+					t.Fatalf("Expected to find status for %s, found nil", bundleName)
+				} else if status.Type != bundle.SnapshotBundleType {
+					t.Fatalf("expected snapshot bundle but got %v", status.Type)
+				} else if status.Size != snapshotBundleSize {
+					t.Fatalf("expected snapshot bundle size %d but got %d", snapshotBundleSize, status.Size)
+				}
+
+				txn := storage.NewTransactionOrDie(ctx, manager.Store)
+				defer manager.Store.Abort(ctx, txn)
+
+				ids, err := manager.Store.ListPolicies(ctx, txn)
+				if err != nil {
+					t.Fatal(err)
+				} else if len(ids) != 1 {
+					t.Fatal("Expected 1 policy")
+				}
+
+				bs, err := manager.Store.GetPolicy(ctx, txn, ids[0])
+				exp := []byte(tc.module)
+				if err != nil {
+					t.Fatal(err)
+				} else if !bytes.Equal(bs, exp) {
+					t.Fatalf("Bad policy content. Exp:\n%v\n\nGot:\n\n%v", string(exp), string(bs))
+				}
+			}
+		})
+	}
+}
+
+func TestPluginOneShotWithBundleRegoVersion(t *testing.T) {
+	// Note: modules are parsed before passed to plugin, so any expected errors must be triggered by the compiler stage.
+	tests := []struct {
+		note               string
+		managerRegoVersion ast.RegoVersion
+		bundleRegoVersion  *ast.RegoVersion
+		module             string
+		expErrs            []string
+	}{
+		{
+			note:               "v0.x manager, no bundle version",
+			managerRegoVersion: ast.RegoV0,
+			module: `package foo
+import future.keywords
+corge contains 1 if {
+	input.x == 2
+}`,
+		},
+		{
+			note:               "v0.x manager, no bundle version, shadowed import (no error)",
+			managerRegoVersion: ast.RegoV0,
+			module: `package foo
+import future.keywords
+import data.foo
+import data.bar as foo
+corge contains 1 if {
+	input.x == 2
+}`,
+		},
+
+		{
+			note:               "v0.x manager, v0.x bundle",
+			managerRegoVersion: ast.RegoV0,
+			bundleRegoVersion:  pointTo(ast.RegoV0),
+			module: `package foo
+import future.keywords
+corge contains 1 if {
+	input.x == 2
+}`,
+		},
+		{
+			note:               "v0.x manager, v0.x bundle, shadowed import (no error)",
+			managerRegoVersion: ast.RegoV0,
+			bundleRegoVersion:  pointTo(ast.RegoV0),
+			module: `package foo
+import future.keywords
+import data.foo
+import data.bar as foo
+corge contains 1 if {
+	input.x == 2
+}`,
+		},
+
+		{
+			note:               "v0.x manager, v1.0 bundle",
+			managerRegoVersion: ast.RegoV0,
+			bundleRegoVersion:  pointTo(ast.RegoV1),
+			module: `package foo
+corge contains 1 if {
+	input.x == 2
+}`,
+		},
+		{
+			note:               "v0.x manager, v1.0 bundle, shadowed import (error)",
+			managerRegoVersion: ast.RegoV0,
+			bundleRegoVersion:  pointTo(ast.RegoV1),
+			module: `package foo
+import data.foo
+import data.bar as foo
+corge contains 1 if {
+	input.x == 2
+}`,
+			expErrs: []string{
+				"rego_compile_error: import must not shadow import data.foo",
+			},
+		},
+
+		{
+			note:               "v1.0 manager, no bundle version",
+			managerRegoVersion: ast.RegoV1,
+			module: `package foo
+import future.keywords
+corge contains 1 if {
+	input.x == 2
+}`,
+		},
+		{
+			note:               "v1.0 manager, no bundle version, shadowed import (error)",
+			managerRegoVersion: ast.RegoV1,
+			module: `package foo
+import future.keywords
+import data.foo
+import data.bar as foo
+corge contains 1 if {
+	input.x == 2
+}`,
+			expErrs: []string{
+				"rego_compile_error: import must not shadow import data.foo",
+			},
+		},
+
+		{
+			note:               "v1.0 manager, v0.x bundle",
+			managerRegoVersion: ast.RegoV1,
+			bundleRegoVersion:  pointTo(ast.RegoV0),
+			module: `package foo
+import future.keywords
+corge contains 1 if {
+	input.x == 2
+}`,
+		},
+		{
+			note:               "v1.0 manager, v0.x bundle, shadowed import (no error)",
+			managerRegoVersion: ast.RegoV1,
+			bundleRegoVersion:  pointTo(ast.RegoV0),
+			module: `package foo
+import future.keywords
+import data.foo
+import data.bar as foo
+corge contains 1 if {
+	input.x == 2
+}`,
+		},
+
+		{
+			note:               "v1.0 manager, v1.0 bundle",
+			managerRegoVersion: ast.RegoV1,
+			bundleRegoVersion:  pointTo(ast.RegoV1),
+			module: `package foo
+corge contains 1 if {
+	input.x == 2
+}`,
+		},
+		{
+			note:               "v1.0 manager, v1.0 bundle, shadowed import (error)",
+			managerRegoVersion: ast.RegoV1,
+			bundleRegoVersion:  pointTo(ast.RegoV1),
+			module: `package foo
+import data.foo
+import data.bar as foo
+corge contains 1 if {
+	input.x == 2
+}`,
+			expErrs: []string{
+				"rego_compile_error: import must not shadow import data.foo",
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.note, func(t *testing.T) {
+			ctx := context.Background()
+			managerPopts := ast.ParserOptions{RegoVersion: tc.managerRegoVersion}
+			manager, err := plugins.New(nil, "test-instance-id", inmem.New(),
+				plugins.WithParserOptions(managerPopts))
+			if err != nil {
+				t.Fatal(err)
+			}
+			plugin := New(&Config{}, manager)
+			bundleName := "test-bundle"
+			plugin.status[bundleName] = &Status{Name: bundleName, Metrics: metrics.New()}
+			plugin.downloaders[bundleName] = download.New(download.Config{}, plugin.manager.Client(""), bundleName)
+
+			ensurePluginState(t, plugin, plugins.StateNotReady)
+
+			var bundlePopts ast.ParserOptions
+			m := bundle.Manifest{Revision: "quickbrownfaux"}
+			if tc.bundleRegoVersion != nil {
+				m.SetRegoVersion(*tc.bundleRegoVersion)
+				bundlePopts = ast.ParserOptions{RegoVersion: *tc.bundleRegoVersion}
+			} else {
+				bundlePopts = managerPopts
+			}
+			b := bundle.Bundle{
+				Manifest: m,
+				Data:     map[string]interface{}{},
+				Modules: []bundle.ModuleFile{
+					{
+						Path:   "/foo/bar",
+						Parsed: ast.MustParseModuleWithOpts(tc.module, bundlePopts),
+						Raw:    []byte(tc.module),
+					},
+				},
+				Etag: "foo",
+			}
+
+			b.Manifest.Init()
+
+			plugin.oneShot(ctx, bundleName, download.Update{Bundle: &b, Metrics: metrics.New(), Size: snapshotBundleSize})
+
+			if tc.expErrs != nil {
+				ensurePluginState(t, plugin, plugins.StateNotReady)
+
+				if status, ok := plugin.status[bundleName]; !ok {
+					t.Fatalf("Expected to find status for %s, found nil", bundleName)
+				} else if status.Type != bundle.SnapshotBundleType {
+					t.Fatalf("expected snapshot bundle but got %v", status.Type)
+				} else if errs := status.Errors; len(errs) != len(tc.expErrs) {
+					t.Fatalf("expected errors:\n\n%v\n\nbut got:\n\n%v", tc.expErrs, errs)
+				} else {
+					for _, expErr := range tc.expErrs {
+						found := false
+						for _, err := range errs {
+							if strings.Contains(err.Error(), expErr) {
+								found = true
+								break
+							}
+						}
+						if !found {
+							t.Fatalf("expected error:\n\n%v\n\nbut got:\n\n%v", expErr, errs)
+						}
+					}
+				}
+			} else {
+				ensurePluginState(t, plugin, plugins.StateOK)
+
+				if status, ok := plugin.status[bundleName]; !ok {
+					t.Fatalf("Expected to find status for %s, found nil", bundleName)
+				} else if status.Type != bundle.SnapshotBundleType {
+					t.Fatalf("expected snapshot bundle but got %v", status.Type)
+				} else if status.Size != snapshotBundleSize {
+					t.Fatalf("expected snapshot bundle size %d but got %d", snapshotBundleSize, status.Size)
+				}
+
+				txn := storage.NewTransactionOrDie(ctx, manager.Store)
+				defer manager.Store.Abort(ctx, txn)
+
+				ids, err := manager.Store.ListPolicies(ctx, txn)
+				if err != nil {
+					t.Fatal(err)
+				} else if len(ids) != 1 {
+					t.Fatal("Expected 1 policy")
+				}
+
+				bs, err := manager.Store.GetPolicy(ctx, txn, ids[0])
+				exp := []byte(tc.module)
+				if err != nil {
+					t.Fatal(err)
+				} else if !bytes.Equal(bs, exp) {
+					t.Fatalf("Bad policy content. Exp:\n%v\n\nGot:\n\n%v", string(exp), string(bs))
+				}
+			}
+		})
+	}
+}
+
 func TestPluginOneShotWithAuthzSchemaVerification(t *testing.T) {
 
 	ctx := context.Background()
@@ -134,10 +519,11 @@ func TestPluginOneShotWithAuthzSchemaVerification(t *testing.T) {
 
 	// authz rules with no error
 	authzModule := `package system.authz
+		import rego.v1
 
 		default allow := false
 
-		allow {
+		allow if {
           input.identity == "foo"
 		}`
 
@@ -169,26 +555,27 @@ func TestPluginOneShotWithAuthzSchemaVerification(t *testing.T) {
 
 	// authz rules with errors
 	authzModule = `package system.authz
+		import rego.v1
 
 		default allow := false
 
-		allow {
+		allow if {
           input.identty == "foo"            # type error 1
 		}
 
-        allow {
+        allow if {
           helper1
         }
 
-        helper1 {
+        helper1 if {
           helper2
         }
 
-        helper2 {
+        helper2 if {
           input.method == 123               # type error 2
 		}
 
-        dont_type_check_me {
+        dont_type_check_me if {
           input.methd == "GET"               # type error 3
 		}`
 
@@ -280,22 +667,23 @@ func TestPluginOneShotWithAuthzSchemaVerificationNonDefaultAuthzPath(t *testing.
 	module := "package foo\n\ncorge=1"
 
 	authzModule := `package foo.authz
+		import rego.v1
 
 		default allow := false
 
-		allow {
+		allow if {
           input.identty == "foo"            # type error 1
 		}
 
-        allow {
+        allow if {
           helper
         }
 
-        helper {
+        helper if {
           input.method == 123               # type error 2
 		}
 
-        dont_type_check_me {
+        dont_type_check_me if {
           input.methd == "GET"               # type error 3
 		}`
 
@@ -372,7 +760,7 @@ func TestPluginStartLazyLoadInMem(t *testing.T) {
 		},
 	}
 
-	s1 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	s1 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		err := bundle.NewWriter(w).Write(mockBundle1)
 		if err != nil {
 			t.Fatal(err)
@@ -387,7 +775,7 @@ func TestPluginStartLazyLoadInMem(t *testing.T) {
 		},
 	}
 
-	s2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	s2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		err := bundle.NewWriter(w).Write(mockBundle2)
 		if err != nil {
 			t.Fatal(err)
@@ -831,7 +1219,7 @@ func TestPluginOneShotBundlePersistence(t *testing.T) {
 
 	ensurePluginState(t, plugin, plugins.StateOK)
 
-	result, err := loadBundleFromDisk(plugin.bundlePersistPath, bundleName, nil)
+	result, err := plugin.loadBundleFromDisk(plugin.bundlePersistPath, bundleName, nil)
 	if err != nil {
 		t.Fatal("unexpected error:", err)
 	}
@@ -869,6 +1257,483 @@ func TestPluginOneShotBundlePersistence(t *testing.T) {
 		t.Fatal(err)
 	} else if !reflect.DeepEqual(data, expData) {
 		t.Fatalf("Bad data content. Exp:\n%v\n\nGot:\n\n%v", expData, data)
+	}
+}
+
+func TestPluginOneShotBundlePersistenceV1Compatible(t *testing.T) {
+	// Note: modules are parsed before passed to plugin, so any expected errors must be triggered by the compiler stage.
+	tests := []struct {
+		note         string
+		v1Compatible bool
+		module       string
+		expErrs      []string
+	}{
+		{
+			note: "v0.x",
+			module: `package foo
+import future.keywords
+corge contains 1 if {
+	input.x == 2
+}`,
+		},
+		{
+			note: "v0.x, shadowed import (no error)",
+			module: `package foo
+import future.keywords
+import data.foo
+import data.bar as foo
+corge contains 1 if {
+	input.x == 2
+}`,
+		},
+		{
+			note:         "v1.0",
+			v1Compatible: true,
+			module: `package foo
+corge contains 1 if {
+	input.x == 2
+}`,
+		},
+		{
+			note:         "v1.0, shadowed import",
+			v1Compatible: true,
+			module: `package foo
+import data.foo
+import data.bar as foo
+corge contains 1 if {
+	input.x == 2
+}`,
+			expErrs: []string{
+				"rego_compile_error: import must not shadow import data.foo",
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.note, func(t *testing.T) {
+			regoVersion := ast.RegoV0
+			if tc.v1Compatible {
+				regoVersion = ast.RegoV1
+			}
+			popts := ast.ParserOptions{RegoVersion: regoVersion}
+
+			ctx := context.Background()
+			manager, err := plugins.New(nil, "test-instance-id", inmem.New(), plugins.WithParserOptions(popts))
+			if err != nil {
+				t.Fatal("unexpected error:", err)
+			}
+
+			dir := t.TempDir()
+
+			bundleName := "test-bundle"
+			bundleSource := Source{
+				Persist: true,
+			}
+
+			bundles := map[string]*Source{}
+			bundles[bundleName] = &bundleSource
+
+			plugin := New(&Config{Bundles: bundles}, manager)
+
+			plugin.status[bundleName] = &Status{Name: bundleName, Metrics: metrics.New()}
+			plugin.downloaders[bundleName] = download.New(download.Config{}, plugin.manager.Client(""), bundleName)
+			plugin.bundlePersistPath = filepath.Join(dir, ".opa")
+
+			ensurePluginState(t, plugin, plugins.StateNotReady)
+
+			// simulate a bundle download error with no bundle on disk
+			plugin.oneShot(ctx, bundleName, download.Update{Error: fmt.Errorf("unknown error")})
+
+			if plugin.status[bundleName].Message == "" {
+				t.Fatal("expected error but got none")
+			}
+
+			ensurePluginState(t, plugin, plugins.StateNotReady)
+
+			// download a bundle and persist to disk. Then verify the bundle persisted to disk
+			b := bundle.Bundle{
+				Manifest: bundle.Manifest{Revision: "quickbrownfaux"},
+				Data:     util.MustUnmarshalJSON([]byte(`{"foo": {"bar": 1, "baz": "qux"}}`)).(map[string]interface{}),
+				Modules: []bundle.ModuleFile{
+					{
+						URL:    "/foo/bar.rego",
+						Path:   "/foo/bar.rego",
+						Parsed: ast.MustParseModuleWithOpts(tc.module, popts),
+						Raw:    []byte(tc.module),
+					},
+				},
+				Etag: "foo",
+			}
+
+			b.Manifest.Init()
+			expBndl := b.Copy() // We're opting out of roundtripping in storage/inmem, so we copy ourselves.
+
+			var buf bytes.Buffer
+			if err := bundle.NewWriter(&buf).UseModulePath(true).Write(b); err != nil {
+				t.Fatal("unexpected error:", err)
+			}
+
+			plugin.oneShot(ctx, bundleName, download.Update{Bundle: &b, Metrics: metrics.New(), Raw: &buf})
+
+			if tc.expErrs != nil {
+				ensurePluginState(t, plugin, plugins.StateNotReady)
+
+				if status, ok := plugin.status[bundleName]; !ok {
+					t.Fatalf("Expected to find status for %s, found nil", bundleName)
+				} else if status.Type != bundle.SnapshotBundleType {
+					t.Fatalf("expected snapshot bundle but got %v", status.Type)
+				} else if errs := status.Errors; len(errs) != len(tc.expErrs) {
+					t.Fatalf("expected errors:\n\n%v\n\nbut got:\n\n%v", tc.expErrs, errs)
+				} else {
+					for _, expErr := range tc.expErrs {
+						found := false
+						for _, err := range errs {
+							if strings.Contains(err.Error(), expErr) {
+								found = true
+								break
+							}
+						}
+						if !found {
+							t.Fatalf("expected error:\n\n%v\n\nbut got:\n\n%v", expErr, errs)
+						}
+					}
+				}
+			} else {
+				ensurePluginState(t, plugin, plugins.StateOK)
+
+				result, err := plugin.loadBundleFromDisk(plugin.bundlePersistPath, bundleName, nil)
+				if err != nil {
+					t.Fatal("unexpected error:", err)
+				}
+
+				if !result.Equal(expBndl) {
+					t.Fatalf("expected the downloaded bundle to be equal to the one loaded from disk: result=%v, exp=%v", result, expBndl)
+				}
+
+				// simulate a bundle download error and verify that the bundle on disk is activated
+				plugin.oneShot(ctx, bundleName, download.Update{Error: fmt.Errorf("unknown error")})
+
+				ensurePluginState(t, plugin, plugins.StateOK)
+
+				txn := storage.NewTransactionOrDie(ctx, manager.Store)
+				defer manager.Store.Abort(ctx, txn)
+
+				ids, err := manager.Store.ListPolicies(ctx, txn)
+				if err != nil {
+					t.Fatal(err)
+				} else if len(ids) != 1 {
+					t.Fatal("Expected 1 policy")
+				}
+
+				bs, err := manager.Store.GetPolicy(ctx, txn, ids[0])
+				exp := []byte(tc.module)
+				if err != nil {
+					t.Fatal(err)
+				} else if !bytes.Equal(bs, exp) {
+					t.Fatalf("Bad policy content. Exp:\n%v\n\nGot:\n\n%v", string(exp), string(bs))
+				}
+
+				data, err := manager.Store.Read(ctx, txn, storage.Path{})
+				expData := util.MustUnmarshalJSON([]byte(`{"foo": {"bar": 1, "baz": "qux"}, "system": {"bundles": {"test-bundle": {"etag": "foo", "manifest": {"revision": "quickbrownfaux", "roots": [""]}}}}}`))
+				if err != nil {
+					t.Fatal(err)
+				} else if !reflect.DeepEqual(data, expData) {
+					t.Fatalf("Bad data content. Exp:\n%v\n\nGot:\n\n%v", expData, data)
+				}
+			}
+		})
+	}
+}
+
+func TestPluginOneShotBundlePersistenceWithBundleRegoVersion(t *testing.T) {
+	// Note: modules are parsed before passed to plugin, so any expected errors must be triggered by the compiler stage.
+	tests := []struct {
+		note               string
+		managerRegoVersion ast.RegoVersion
+		bundleRegoVersion  *ast.RegoVersion
+		module             string
+		expErrs            []string
+	}{
+		{
+			note:               "v0.x manager, no bundle rego version",
+			managerRegoVersion: ast.RegoV0,
+			module: `package foo
+import future.keywords
+corge contains 1 if {
+	input.x == 2
+}`,
+		},
+		{
+			note:               "v0.x manager, no bundle rego version, shadowed import (no error)",
+			managerRegoVersion: ast.RegoV0,
+			module: `package foo
+import future.keywords
+import data.foo
+import data.bar as foo
+corge contains 1 if {
+	input.x == 2
+}`,
+		},
+		{
+			note:               "v0.x manager, v0.x bundle",
+			managerRegoVersion: ast.RegoV0,
+			bundleRegoVersion:  pointTo(ast.RegoV0),
+			module: `package foo
+import future.keywords
+corge contains 1 if {
+	input.x == 2
+}`,
+		},
+		{
+			note:               "v0.x manager, v0.x bundle, shadowed import (no error)",
+			managerRegoVersion: ast.RegoV0,
+			bundleRegoVersion:  pointTo(ast.RegoV0),
+			module: `package foo
+import future.keywords
+import data.foo
+import data.bar as foo
+corge contains 1 if {
+	input.x == 2
+}`,
+		},
+		{
+			note:               "v0.x manager, v1.0 bundle",
+			managerRegoVersion: ast.RegoV0,
+			bundleRegoVersion:  pointTo(ast.RegoV1),
+			module: `package foo
+corge contains 1 if {
+	input.x == 2
+}`,
+		},
+		{
+			note:               "v0.x manager, v1.0 bundle, shadowed import",
+			managerRegoVersion: ast.RegoV0,
+			bundleRegoVersion:  pointTo(ast.RegoV1),
+			module: `package foo
+import data.foo
+import data.bar as foo
+corge contains 1 if {
+	input.x == 2
+}`,
+			expErrs: []string{
+				"rego_compile_error: import must not shadow import data.foo",
+			},
+		},
+
+		{
+			note:               "v1.0 manager, no bundle rego version",
+			managerRegoVersion: ast.RegoV1,
+			module: `package foo
+import future.keywords
+corge contains 1 if {
+	input.x == 2
+}`,
+		},
+		{
+			note:               "v1.0 manager, no bundle rego version, shadowed import (no error)",
+			managerRegoVersion: ast.RegoV1,
+			module: `package foo
+import future.keywords
+import data.foo
+import data.bar as foo
+corge contains 1 if {
+	input.x == 2
+}`,
+			expErrs: []string{
+				"rego_compile_error: import must not shadow import data.foo",
+			},
+		},
+		{
+			note:               "v1.0 manager, v0.x bundle",
+			managerRegoVersion: ast.RegoV1,
+			bundleRegoVersion:  pointTo(ast.RegoV0),
+			module: `package foo
+import future.keywords
+corge contains 1 if {
+	input.x == 2
+}`,
+		},
+		{
+			note:               "v1.0 manager, v0.x bundle, shadowed import (no error)",
+			managerRegoVersion: ast.RegoV1,
+			bundleRegoVersion:  pointTo(ast.RegoV0),
+			module: `package foo
+import future.keywords
+import data.foo
+import data.bar as foo
+corge contains 1 if {
+	input.x == 2
+}`,
+		},
+		{
+			note:               "v1.0 manager, v1.0 bundle",
+			managerRegoVersion: ast.RegoV1,
+			bundleRegoVersion:  pointTo(ast.RegoV1),
+			module: `package foo
+corge contains 1 if {
+	input.x == 2
+}`,
+		},
+		{
+			note:               "v1.0 manager, v1.0 bundle, shadowed import",
+			managerRegoVersion: ast.RegoV1,
+			bundleRegoVersion:  pointTo(ast.RegoV1),
+			module: `package foo
+import data.foo
+import data.bar as foo
+corge contains 1 if {
+	input.x == 2
+}`,
+			expErrs: []string{
+				"rego_compile_error: import must not shadow import data.foo",
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.note, func(t *testing.T) {
+			ctx := context.Background()
+			managerPopts := ast.ParserOptions{RegoVersion: tc.managerRegoVersion}
+			manager, err := plugins.New(nil, "test-instance-id", inmem.New(),
+				plugins.WithParserOptions(managerPopts))
+			if err != nil {
+				t.Fatal("unexpected error:", err)
+			}
+
+			dir := t.TempDir()
+
+			bundleName := "test-bundle"
+			bundleSource := Source{
+				Persist: true,
+			}
+
+			bundles := map[string]*Source{}
+			bundles[bundleName] = &bundleSource
+
+			plugin := New(&Config{Bundles: bundles}, manager)
+
+			plugin.status[bundleName] = &Status{Name: bundleName, Metrics: metrics.New()}
+			plugin.downloaders[bundleName] = download.New(download.Config{}, plugin.manager.Client(""), bundleName)
+			plugin.bundlePersistPath = filepath.Join(dir, ".opa")
+
+			ensurePluginState(t, plugin, plugins.StateNotReady)
+
+			// simulate a bundle download error with no bundle on disk
+			plugin.oneShot(ctx, bundleName, download.Update{Error: fmt.Errorf("unknown error")})
+
+			if plugin.status[bundleName].Message == "" {
+				t.Fatal("expected error but got none")
+			}
+
+			ensurePluginState(t, plugin, plugins.StateNotReady)
+
+			// download a bundle and persist to disk. Then verify the bundle persisted to disk
+			var bundlePopts ast.ParserOptions
+			m := bundle.Manifest{Revision: "quickbrownfaux"}
+			if tc.bundleRegoVersion != nil {
+				m.SetRegoVersion(*tc.bundleRegoVersion)
+				bundlePopts = ast.ParserOptions{RegoVersion: *tc.bundleRegoVersion}
+			} else {
+				bundlePopts = managerPopts
+			}
+			b := bundle.Bundle{
+				Manifest: m,
+				Data:     util.MustUnmarshalJSON([]byte(`{"foo": {"bar": 1, "baz": "qux"}}`)).(map[string]interface{}),
+				Modules: []bundle.ModuleFile{
+					{
+						URL:    "/foo/bar.rego",
+						Path:   "/foo/bar.rego",
+						Parsed: ast.MustParseModuleWithOpts(tc.module, bundlePopts),
+						Raw:    []byte(tc.module),
+					},
+				},
+				Etag: "foo",
+			}
+
+			b.Manifest.Init()
+			expBndl := b.Copy() // We're opting out of roundtripping in storage/inmem, so we copy ourselves.
+
+			var buf bytes.Buffer
+			if err := bundle.NewWriter(&buf).UseModulePath(true).Write(b); err != nil {
+				t.Fatal("unexpected error:", err)
+			}
+
+			plugin.oneShot(ctx, bundleName, download.Update{Bundle: &b, Metrics: metrics.New(), Raw: &buf})
+
+			if tc.expErrs != nil {
+				ensurePluginState(t, plugin, plugins.StateNotReady)
+
+				if status, ok := plugin.status[bundleName]; !ok {
+					t.Fatalf("Expected to find status for %s, found nil", bundleName)
+				} else if status.Type != bundle.SnapshotBundleType {
+					t.Fatalf("expected snapshot bundle but got %v", status.Type)
+				} else if errs := status.Errors; len(errs) != len(tc.expErrs) {
+					t.Fatalf("expected errors:\n\n%v\n\nbut got:\n\n%v", tc.expErrs, errs)
+				} else {
+					for _, expErr := range tc.expErrs {
+						found := false
+						for _, err := range errs {
+							if strings.Contains(err.Error(), expErr) {
+								found = true
+								break
+							}
+						}
+						if !found {
+							t.Fatalf("expected error:\n\n%v\n\nbut got:\n\n%v", expErr, errs)
+						}
+					}
+				}
+			} else {
+				ensurePluginState(t, plugin, plugins.StateOK)
+
+				result, err := plugin.loadBundleFromDisk(plugin.bundlePersistPath, bundleName, nil)
+				if err != nil {
+					t.Fatal("unexpected error:", err)
+				}
+
+				if !result.Equal(expBndl) {
+					t.Fatalf("expected the downloaded bundle to be equal to the one loaded from disk: result=%v, exp=%v", result, expBndl)
+				}
+
+				// simulate a bundle download error and verify that the bundle on disk is activated
+				plugin.oneShot(ctx, bundleName, download.Update{Error: fmt.Errorf("unknown error")})
+
+				ensurePluginState(t, plugin, plugins.StateOK)
+
+				txn := storage.NewTransactionOrDie(ctx, manager.Store)
+				defer manager.Store.Abort(ctx, txn)
+
+				ids, err := manager.Store.ListPolicies(ctx, txn)
+				if err != nil {
+					t.Fatal(err)
+				} else if len(ids) != 1 {
+					t.Fatal("Expected 1 policy")
+				}
+
+				bs, err := manager.Store.GetPolicy(ctx, txn, ids[0])
+				exp := []byte(tc.module)
+				if err != nil {
+					t.Fatal(err)
+				} else if !bytes.Equal(bs, exp) {
+					t.Fatalf("Bad policy content. Exp:\n%v\n\nGot:\n\n%v", string(exp), string(bs))
+				}
+
+				data, err := manager.Store.Read(ctx, txn, storage.Path{})
+				var regoVersion string
+				if tc.bundleRegoVersion != nil {
+					regoVersion = fmt.Sprintf(`, "rego_version": %d`, bundleRegoVersion(*tc.bundleRegoVersion))
+				} else {
+					regoVersion = ""
+				}
+				expData := util.MustUnmarshalJSON([]byte(fmt.Sprintf(`{"foo": {"bar": 1, "baz": "qux"}, "system": {"bundles": {"test-bundle": {"etag": "foo", "manifest": {"revision": "quickbrownfaux"%s, "roots": [""]}}}}}`,
+					regoVersion)))
+				if err != nil {
+					t.Fatal(err)
+				} else if !reflect.DeepEqual(data, expData) {
+					t.Fatalf("Bad data content. Exp:\n%v\n\nGot:\n\n%v", expData, data)
+				}
+			}
+		})
 	}
 }
 
@@ -933,7 +1798,7 @@ func TestPluginOneShotSignedBundlePersistence(t *testing.T) {
 	ensurePluginState(t, plugin, plugins.StateOK)
 
 	// load signed bundle from disk
-	result, err := loadBundleFromDisk(plugin.bundlePersistPath, bundleName, bundles[bundleName])
+	result, err := plugin.loadBundleFromDisk(plugin.bundlePersistPath, bundleName, bundles[bundleName])
 	if err != nil {
 		t.Fatal("unexpected error:", err)
 	}
@@ -1049,6 +1914,560 @@ func TestLoadAndActivateBundlesFromDisk(t *testing.T) {
 	}
 }
 
+func TestLoadAndActivateBundlesFromDiskReservedChars(t *testing.T) {
+
+	ctx := context.Background()
+	manager := getTestManager()
+
+	dir := t.TempDir()
+
+	goos = "windows"
+
+	bundleName := "test?bundle=opa" // bundle name contains reserved characters
+	bundleSource := Source{
+		Persist: true,
+	}
+
+	bundles := map[string]*Source{}
+	bundles[bundleName] = &bundleSource
+
+	plugin := New(&Config{Bundles: bundles}, manager)
+	plugin.bundlePersistPath = filepath.Join(dir, ".opa")
+
+	plugin.loadAndActivateBundlesFromDisk(ctx)
+
+	// persist a bundle to disk and then load it
+	module := "package foo\n\ncorge=1"
+
+	b := bundle.Bundle{
+		Manifest: bundle.Manifest{Revision: "quickbrownfaux"},
+		Data:     util.MustUnmarshalJSON([]byte(`{"foo": {"bar": 1, "baz": "qux"}}`)).(map[string]interface{}),
+		Modules: []bundle.ModuleFile{
+			{
+				URL:    "/foo/bar.rego",
+				Path:   "/foo/bar.rego",
+				Parsed: ast.MustParseModule(module),
+				Raw:    []byte(module),
+			},
+		},
+	}
+
+	b.Manifest.Init()
+
+	var buf bytes.Buffer
+	if err := bundle.NewWriter(&buf).UseModulePath(true).Write(b); err != nil {
+		t.Fatal("unexpected error:", err)
+	}
+
+	err := plugin.saveBundleToDisk(bundleName, &buf)
+	if err != nil {
+		t.Fatalf("unexpected error %v", err)
+	}
+
+	plugin.loadAndActivateBundlesFromDisk(ctx)
+
+	txn := storage.NewTransactionOrDie(ctx, manager.Store)
+	defer manager.Store.Abort(ctx, txn)
+
+	ids, err := manager.Store.ListPolicies(ctx, txn)
+	if err != nil {
+		t.Fatal(err)
+	} else if len(ids) != 1 {
+		t.Fatal("Expected 1 policy")
+	}
+
+	bs, err := manager.Store.GetPolicy(ctx, txn, ids[0])
+	exp := []byte("package foo\n\ncorge=1")
+	if err != nil {
+		t.Fatal(err)
+	} else if !bytes.Equal(bs, exp) {
+		t.Fatalf("Bad policy content. Exp:\n%v\n\nGot:\n\n%v", string(exp), string(bs))
+	}
+
+	data, err := manager.Store.Read(ctx, txn, storage.Path{})
+	expData := util.MustUnmarshalJSON([]byte(`{"foo": {"bar": 1, "baz": "qux"}, "system": {"bundles": {"test?bundle=opa": {"etag": "", "manifest": {"revision": "quickbrownfaux", "roots": [""]}}}}}`))
+	if err != nil {
+		t.Fatal(err)
+	} else if !reflect.DeepEqual(data, expData) {
+		t.Fatalf("Bad data content. Exp:\n%v\n\nGot:\n\n%v", expData, data)
+	}
+}
+
+func TestLoadAndActivateBundlesFromDiskV1Compatible(t *testing.T) {
+	type update struct {
+		modules map[string]string
+		expErrs []string
+	}
+	// Note: modules are parsed before passed to plugin, so any expected errors must be triggered by the compiler stage.
+	tests := []struct {
+		note         string
+		v1Compatible bool
+		updates      []update
+	}{
+		{
+			note: "v0.x",
+			updates: []update{
+				{
+					modules: map[string]string{
+						"/foo/bar.rego": `package foo
+import future.keywords
+corge contains 1 if {
+	input.x == 2
+}`,
+					},
+				},
+			},
+		},
+		{
+			note: "v0.x, shadowed import (no error)",
+			updates: []update{
+				{
+					modules: map[string]string{
+						"/foo/bar.rego": `package foo
+import future.keywords
+import data.foo
+import data.bar as foo
+corge contains 1 if {
+	input.x == 2
+}`,
+					},
+				},
+			},
+		},
+		{
+			note:         "v1.0",
+			v1Compatible: true,
+			updates: []update{
+				{
+					modules: map[string]string{
+						"/foo/bar.rego": `package foo
+corge contains 1 if {
+	input.x == 2
+}`,
+					},
+				},
+			},
+		},
+		{
+			note:         "v1.0, shadowed import",
+			v1Compatible: true,
+			updates: []update{
+				{
+					modules: map[string]string{
+						"/foo/bar.rego": `package foo
+import data.foo
+import data.bar as foo
+corge contains 1 if {
+	input.x == 2
+}`,
+					},
+					expErrs: []string{
+						"rego_compile_error: import must not shadow import data.foo",
+					},
+				},
+			},
+		},
+		{
+			note:         "v1.0, module updated",
+			v1Compatible: true,
+			updates: []update{
+				{
+					modules: map[string]string{
+						"/foo/bar.rego": `package foo
+corge contains 1 if {
+	input.x == 2
+}`,
+					},
+				},
+				{
+					modules: map[string]string{
+						"/foo/bar.rego": `package foo
+corge contains 2 if {
+	input.x == 3
+}`,
+					},
+				},
+			},
+		},
+		{
+			note:         "v1.0, module updated, shadowed import",
+			v1Compatible: true,
+			updates: []update{
+				{
+					modules: map[string]string{
+						"/foo/bar.rego": `package foo
+corge contains 1 if {
+	input.x == 2
+}`,
+					},
+				},
+				{
+					modules: map[string]string{
+						"/foo/bar.rego": `package foo
+import data.foo
+import data.bar as foo
+corge contains 2 if {
+	input.x == 3
+}`,
+					},
+					expErrs: []string{
+						"rego_compile_error: import must not shadow import data.foo",
+					},
+				},
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.note, func(t *testing.T) {
+			regoVersion := ast.RegoV0
+			if tc.v1Compatible {
+				regoVersion = ast.RegoV1
+			}
+			popts := ast.ParserOptions{RegoVersion: regoVersion}
+
+			ctx := context.Background()
+			manager, err := plugins.New(nil, "test-instance-id", inmem.New(),
+				plugins.WithParserOptions(popts))
+			if err != nil {
+				t.Fatal("unexpected error:", err)
+			}
+
+			dir := t.TempDir()
+
+			bundleName := "test-bundle"
+			bundleSource := Source{
+				Persist: true,
+			}
+
+			bundleNameOther := "test-bundle-other"
+			bundleSourceOther := Source{}
+
+			bundles := map[string]*Source{}
+			bundles[bundleName] = &bundleSource
+			bundles[bundleNameOther] = &bundleSourceOther
+
+			plugin := New(&Config{Bundles: bundles}, manager)
+			plugin.bundlePersistPath = filepath.Join(dir, ".opa")
+
+			plugin.loadAndActivateBundlesFromDisk(ctx)
+
+			for _, update := range tc.updates {
+				// persist a bundle to disk and then load it
+				b := bundle.Bundle{
+					Manifest: bundle.Manifest{Revision: "quickbrownfaux"},
+					Data:     util.MustUnmarshalJSON([]byte(`{"foo": {"bar": 1, "baz": "qux"}}`)).(map[string]interface{}),
+				}
+				for url, module := range update.modules {
+					b.Modules = append(b.Modules, bundle.ModuleFile{
+						URL:    url,
+						Path:   url,
+						Parsed: ast.MustParseModuleWithOpts(module, popts),
+						Raw:    []byte(module),
+					})
+				}
+
+				b.Manifest.Init()
+
+				var buf bytes.Buffer
+				if err := bundle.NewWriter(&buf).UseModulePath(true).Write(b); err != nil {
+					t.Fatal("unexpected error:", err)
+				}
+
+				err = plugin.saveBundleToDisk(bundleName, &buf)
+				if err != nil {
+					t.Fatalf("unexpected error %v", err)
+				}
+
+				plugin.loadAndActivateBundlesFromDisk(ctx)
+
+				if update.expErrs != nil {
+					if status, ok := plugin.status[bundleName]; !ok {
+						t.Fatalf("Expected to find status for %s, found nil", bundleName)
+					} else if status.Type != bundle.SnapshotBundleType {
+						t.Fatalf("expected snapshot bundle but got %v", status.Type)
+					} else if errs := status.Errors; len(errs) != len(update.expErrs) {
+						t.Fatalf("expected errors:\n\n%v\n\nbut got:\n\n%v", update.expErrs, errs)
+					} else {
+						for _, expErr := range update.expErrs {
+							found := false
+							for _, err := range errs {
+								if strings.Contains(err.Error(), expErr) {
+									found = true
+									break
+								}
+							}
+							if !found {
+								t.Fatalf("expected error:\n\n%v\n\nbut got:\n\n%v", expErr, errs)
+							}
+						}
+					}
+				} else {
+					txn := storage.NewTransactionOrDie(ctx, manager.Store)
+					fatal := func(args ...any) {
+						manager.Store.Abort(ctx, txn)
+						t.Fatal(args...)
+					}
+
+					ids, err := manager.Store.ListPolicies(ctx, txn)
+					if err != nil {
+						fatal(err)
+					}
+					for _, id := range ids {
+						bs, err := manager.Store.GetPolicy(ctx, txn, id)
+						p, _ := strings.CutPrefix(id, bundleName)
+						module := update.modules[p]
+						exp := []byte(module)
+						if err != nil {
+							fatal(err)
+						} else if !bytes.Equal(bs, exp) {
+							fatal("Bad policy content. Exp:\n%v\n\nGot:\n\n%v", string(exp), string(bs))
+						}
+					}
+
+					data, err := manager.Store.Read(ctx, txn, storage.Path{})
+					expData := util.MustUnmarshalJSON([]byte(`{"foo": {"bar": 1, "baz": "qux"}, "system": {"bundles": {"test-bundle": {"etag": "", "manifest": {"revision": "quickbrownfaux", "roots": [""]}}}}}`))
+					if err != nil {
+						fatal(err)
+					} else if !reflect.DeepEqual(data, expData) {
+						fatal("Bad data content. Exp:\n%v\n\nGot:\n\n%v", expData, data)
+					}
+
+					manager.Store.Abort(ctx, txn)
+				}
+			}
+		})
+	}
+}
+
+func TestLoadAndActivateBundlesFromDiskWithBundleRegoVersion(t *testing.T) {
+	// Note: modules are parsed before passed to plugin, so any expected errors must be triggered by the compiler stage.
+	tests := []struct {
+		note               string
+		managerRegoVersion ast.RegoVersion
+		bundleRegoVersion  *ast.RegoVersion
+		module             string
+		expErrs            []string
+	}{
+		{
+			note:               "v0.x manager, no bundle rego version",
+			managerRegoVersion: ast.RegoV0,
+			module: `package foo
+corge[1] {
+	input.x == 2
+}`,
+		},
+		{
+			note:               "v0.x manager, v0.x bundle",
+			managerRegoVersion: ast.RegoV0,
+			bundleRegoVersion:  pointTo(ast.RegoV0),
+			module: `package foo
+corge[1] {
+	input.x == 2
+}`,
+		},
+		{
+			note:               "v0.x manager, v1.0 bundle",
+			managerRegoVersion: ast.RegoV0,
+			bundleRegoVersion:  pointTo(ast.RegoV1),
+			module: `package foo
+corge contains 1 if {
+	input.x == 2
+}`,
+		},
+		{
+			note:               "v0.x manager, v1.0 bundle, compiler err (shadowed import)",
+			managerRegoVersion: ast.RegoV0,
+			bundleRegoVersion:  pointTo(ast.RegoV1),
+			module: `package foo
+import data.foo
+import data.bar as foo
+corge contains 1 if {
+	input.x == 2
+}`,
+			expErrs: []string{
+				"rego_compile_error: import must not shadow import data.foo",
+			},
+		},
+		{
+			note:               "v1.0 manager, no bundle rego version",
+			managerRegoVersion: ast.RegoV1,
+			module: `package foo
+corge contains 1 if {
+	input.x == 2
+}`,
+		},
+		{
+			note:               "v1.0 manager, no bundle rego version, compiler err (shadowed import)",
+			managerRegoVersion: ast.RegoV1,
+			module: `package foo
+import data.foo
+import data.bar as foo
+corge contains 1 if {
+	input.x == 2
+}`,
+			expErrs: []string{
+				"rego_compile_error: import must not shadow import data.foo",
+			},
+		},
+		{
+			note:               "v1.0 manager, v0.x bundle",
+			managerRegoVersion: ast.RegoV1,
+			bundleRegoVersion:  pointTo(ast.RegoV0),
+			module: `package foo
+corge[1] {
+	input.x == 2
+}`,
+		},
+		{
+			note:               "v1.0 manager, v1.0 bundle",
+			managerRegoVersion: ast.RegoV1,
+			bundleRegoVersion:  pointTo(ast.RegoV1),
+			module: `package foo
+corge contains 1 if {
+	input.x == 2
+}`,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.note, func(t *testing.T) {
+			ctx := context.Background()
+			managerPopts := ast.ParserOptions{RegoVersion: tc.managerRegoVersion}
+			manager, err := plugins.New(nil, "test-instance-id", inmem.New(),
+				plugins.WithParserOptions(managerPopts))
+			if err != nil {
+				t.Fatal("unexpected error:", err)
+			}
+
+			dir := t.TempDir()
+
+			bundleName := "test-bundle"
+			bundleSource := Source{
+				Persist: true,
+			}
+
+			bundleNameOther := "test-bundle-other"
+			bundleSourceOther := Source{}
+
+			bundles := map[string]*Source{}
+			bundles[bundleName] = &bundleSource
+			bundles[bundleNameOther] = &bundleSourceOther
+
+			plugin := New(&Config{Bundles: bundles}, manager)
+			plugin.bundlePersistPath = filepath.Join(dir, ".opa")
+
+			plugin.loadAndActivateBundlesFromDisk(ctx)
+
+			// persist a bundle to disk and then load it
+			m := bundle.Manifest{Revision: "quickbrownfaux"}
+			var bundlePopts ast.ParserOptions
+			if tc.bundleRegoVersion != nil {
+				m.SetRegoVersion(*tc.bundleRegoVersion)
+				bundlePopts = ast.ParserOptions{RegoVersion: *tc.bundleRegoVersion}
+			} else {
+				bundlePopts = managerPopts
+			}
+			b := bundle.Bundle{
+				Manifest: m,
+				Data:     util.MustUnmarshalJSON([]byte(`{"foo": {"bar": 1, "baz": "qux"}}`)).(map[string]interface{}),
+				Modules: []bundle.ModuleFile{
+					{
+						URL:    "/foo/bar.rego",
+						Path:   "/foo/bar.rego",
+						Parsed: ast.MustParseModuleWithOpts(tc.module, bundlePopts),
+						Raw:    []byte(tc.module),
+					},
+				},
+			}
+
+			b.Manifest.Init()
+
+			var buf bytes.Buffer
+			if err := bundle.NewWriter(&buf).UseModulePath(true).Write(b); err != nil {
+				t.Fatal("unexpected error:", err)
+			}
+
+			err = plugin.saveBundleToDisk(bundleName, &buf)
+			if err != nil {
+				t.Fatalf("unexpected error %v", err)
+			}
+
+			plugin.loadAndActivateBundlesFromDisk(ctx)
+
+			if tc.expErrs != nil {
+				if status, ok := plugin.status[bundleName]; !ok {
+					t.Fatalf("Expected to find status for %s, found nil", bundleName)
+				} else if status.Type != bundle.SnapshotBundleType {
+					t.Fatalf("expected snapshot bundle but got %v", status.Type)
+				} else if errs := status.Errors; len(errs) != len(tc.expErrs) {
+					t.Fatalf("expected errors:\n\n%v\n\nbut got:\n\n%v", tc.expErrs, errs)
+				} else {
+					for _, expErr := range tc.expErrs {
+						found := false
+						for _, err := range errs {
+							if strings.Contains(err.Error(), expErr) {
+								found = true
+								break
+							}
+						}
+						if !found {
+							t.Fatalf("expected error:\n\n%v\n\nbut got:\n\n%v", expErr, errs)
+						}
+					}
+				}
+			} else {
+				txn := storage.NewTransactionOrDie(ctx, manager.Store)
+				defer manager.Store.Abort(ctx, txn)
+
+				ids, err := manager.Store.ListPolicies(ctx, txn)
+				if err != nil {
+					t.Fatal(err)
+				} else if len(ids) != 1 {
+					t.Fatal("Expected 1 policy")
+				}
+
+				bs, err := manager.Store.GetPolicy(ctx, txn, ids[0])
+				exp := []byte(tc.module)
+				if err != nil {
+					t.Fatal(err)
+				} else if !bytes.Equal(bs, exp) {
+					t.Fatalf("Bad policy content. Exp:\n%v\n\nGot:\n\n%v", string(exp), string(bs))
+				}
+
+				data, err := manager.Store.Read(ctx, txn, storage.Path{})
+				regoVersionStr := ""
+				if tc.bundleRegoVersion != nil {
+					regoVersionStr = fmt.Sprintf(`, "rego_version": %d`, bundleRegoVersion(*tc.bundleRegoVersion))
+				}
+				expData := util.MustUnmarshalJSON([]byte(fmt.Sprintf(`{"foo": {"bar": 1, "baz": "qux"}, "system": {"bundles": {"test-bundle": {"etag": "", "manifest": {"revision": "quickbrownfaux"%s, "roots": [""]}}}}}`,
+					regoVersionStr)))
+				if err != nil {
+					t.Fatal(err)
+				} else if !reflect.DeepEqual(data, expData) {
+					t.Fatalf("Bad data content. Exp:\n%v\n\nGot:\n\n%v", expData, data)
+				}
+			}
+		})
+	}
+}
+
+func pointTo[T any](v T) *T {
+	return &v
+}
+
+func bundleRegoVersion(v ast.RegoVersion) int {
+	switch v {
+	case ast.RegoV0:
+		return 0
+	case ast.RegoV0CompatV1:
+		return 0
+	case ast.RegoV1:
+		return 1
+	}
+	panic("unknown ast.RegoVersion")
+}
+
 func TestLoadAndActivateDepBundlesFromDisk(t *testing.T) {
 	ctx := context.Background()
 	manager := getTestManager()
@@ -1075,18 +2494,20 @@ func TestLoadAndActivateDepBundlesFromDisk(t *testing.T) {
 	module1 := `
 package bar
 
+import rego.v1
 import data.foo
 
 default allow = false
 
-allow {
+allow if {
 	foo.is_one(1)
 }`
 
 	module2 := `
 package foo
+import rego.v1
 
-is_one(x) {
+is_one(x) if {
 	x == 1
 }`
 
@@ -1173,11 +2594,12 @@ func TestLoadAndActivateDepBundlesFromDiskMaxAttempts(t *testing.T) {
 	module := `
 package bar
 
+import rego.v1
 import data.foo
 
 default allow = false
 
-allow {
+allow if {
 	foo.is_one(1)
 }`
 
@@ -1230,7 +2652,10 @@ func TestPluginOneShotCompileError(t *testing.T) {
 
 	ensurePluginState(t, plugin, plugins.StateNotReady)
 
-	raw1 := "package foo\n\np[x] { x = 1 }"
+	raw1 := `package foo
+import rego.v1
+
+p contains x if { x = 1 }`
 
 	b1 := &bundle.Bundle{
 		Data: map[string]interface{}{"a": "b"},
@@ -1252,8 +2677,11 @@ func TestPluginOneShotCompileError(t *testing.T) {
 		Data: map[string]interface{}{"a": "b"},
 		Modules: []bundle.ModuleFile{
 			{
-				Path:   "/example2.rego",
-				Parsed: ast.MustParseModule("package foo\n\np[x]"),
+				Path: "/example2.rego",
+				Parsed: ast.MustParseModule(`package foo
+import rego.v1
+
+p contains x`),
 			},
 		},
 	}
@@ -1564,7 +2992,10 @@ func TestPluginListener(t *testing.T) {
 		t.Fatal("Listener not properly registered")
 	}
 
-	module := "package gork\np[x] { x = 1 }"
+	module := `package gork
+import rego.v1
+
+p contains x if { x = 1 }`
 
 	b := bundle.Bundle{
 		Manifest: bundle.Manifest{
@@ -1589,7 +3020,10 @@ func TestPluginListener(t *testing.T) {
 
 	validateStatus(t, s1, "quickbrownfaux", false)
 
-	module = "package gork\np[x]"
+	module = `package gork
+import rego.v1
+
+p contains x`
 
 	b.Manifest.Revision = "slowgreenburd"
 	b.Modules[0] = bundle.ModuleFile{
@@ -1604,7 +3038,10 @@ func TestPluginListener(t *testing.T) {
 
 	validateStatus(t, s2, "quickbrownfaux", true)
 
-	module = "package gork\np[1]"
+	module = `package gork
+import rego.v1
+
+p contains 1`
 	b.Manifest.Revision = "fancybluederg"
 	b.Modules[0] = bundle.ModuleFile{
 		Path:   "/foo.rego",
@@ -1730,7 +3167,10 @@ func TestPluginBulkListener(t *testing.T) {
 		t.Fatal("Bulk listener not properly registered")
 	}
 
-	module := "package gork\np[x] { x = 1 }"
+	module := `package gork
+import rego.v1
+
+p contains x if { x = 1 }`
 
 	b := bundle.Bundle{
 		Manifest: bundle.Manifest{
@@ -1771,7 +3211,10 @@ func TestPluginBulkListener(t *testing.T) {
 		}
 	}
 
-	module = "package gork\np[x]"
+	module = `package gork
+import rego.v1
+
+p contains x`
 
 	b.Manifest.Revision = "slowgreenburd"
 	b.Modules[0] = bundle.ModuleFile{
@@ -1801,7 +3244,10 @@ func TestPluginBulkListener(t *testing.T) {
 		}
 	}
 
-	module = "package gork\np[1]"
+	module = `package gork
+import rego.v1
+
+p contains 1`
 	b.Manifest.Revision = "fancybluederg"
 	b.Modules[0] = bundle.ModuleFile{
 		Path:   "/foo.rego",
@@ -1840,7 +3286,10 @@ func TestPluginBulkListener(t *testing.T) {
 	}
 
 	// Test updates the other bundles
-	module = "package p1\np[x] { x = 1 }"
+	module = `package p1
+import rego.v1
+
+p contains x if { x = 1 }`
 
 	b1 := bundle.Bundle{
 		Manifest: bundle.Manifest{
@@ -1914,7 +3363,10 @@ func TestPluginBulkListenerStatusCopyOnly(t *testing.T) {
 		bulkChan <- status
 	})
 
-	module := "package gork\np[x] { x = 1 }"
+	module := `package gork
+import rego.v1
+
+p contains x if { x = 1 }`
 
 	b := bundle.Bundle{
 		Manifest: bundle.Manifest{
@@ -2012,8 +3464,8 @@ func TestPluginActivateScopedBundle(t *testing.T) {
 	// Ensure a/a3-6 are intact. a1-2 are overwritten by bundle, and
 	// that the manifest has been written to storage.
 	expData := util.MustUnmarshalJSON([]byte(`{"a1": "foo", "a3": "x2", "a5": "x3"}`))
-	expIds := []string{filepath.Join(bundleName, "bundle/id1"), "some/id2", "some/id3"}
-	validateStoreState(ctx, t, manager.Store, "/a", expData, expIds, bundleName, "quickbrownfaux", nil)
+	expIDs := []string{filepath.Join(bundleName, "bundle/id1"), "some/id2", "some/id3"}
+	validateStoreState(ctx, t, manager.Store, "/a", expData, expIDs, bundleName, "quickbrownfaux", nil)
 
 	// Activate a bundle that is scoped to a/a3 ad a/a6. Include a function
 	// inside package a.a4 that we can depend on outside of the bundle scope to
@@ -2047,8 +3499,8 @@ func TestPluginActivateScopedBundle(t *testing.T) {
 
 	// Ensure a/a5-a6 are intact. a3 and a4 are overwritten by bundle.
 	expData = util.MustUnmarshalJSON([]byte(`{"a3": "foo", "a5": "x3"}`))
-	expIds = []string{filepath.Join(bundleName, "bundle/id2"), "some/id3"}
-	validateStoreState(ctx, t, manager.Store, "/a", expData, expIds, bundleName, "quickbrownfaux-2",
+	expIDs = []string{filepath.Join(bundleName, "bundle/id2"), "some/id3"}
+	validateStoreState(ctx, t, manager.Store, "/a", expData, expIDs, bundleName, "quickbrownfaux-2",
 		map[string]interface{}{
 			"a": map[string]interface{}{"a1": "deadbeef"},
 		})
@@ -2071,8 +3523,8 @@ func TestPluginActivateScopedBundle(t *testing.T) {
 
 	// Ensure bundle activation failed by checking that previous revision is
 	// still active.
-	expIds = []string{filepath.Join(bundleName, "bundle/id2"), "not_scoped", "some/id3"}
-	validateStoreState(ctx, t, manager.Store, "/a", expData, expIds, bundleName, "quickbrownfaux-2",
+	expIDs = []string{filepath.Join(bundleName, "bundle/id2"), "not_scoped", "some/id3"}
+	validateStoreState(ctx, t, manager.Store, "/a", expData, expIDs, bundleName, "quickbrownfaux-2",
 		map[string]interface{}{
 			"a": map[string]interface{}{"a1": "deadbeef"},
 		})
@@ -2452,8 +3904,8 @@ func TestUpgradeLegacyBundleToMuiltiBundleSameBundle(t *testing.T) {
 
 	// Ensure it has been activated
 	expData := util.MustUnmarshalJSON([]byte(`{"a2": "foo"}`))
-	expIds := []string{"bundle/id1"}
-	validateStoreState(ctx, t, manager.Store, "/a", expData, expIds, bundleName, "quickbrownfaux", nil)
+	expIDs := []string{"bundle/id1"}
+	validateStoreState(ctx, t, manager.Store, "/a", expData, expIDs, bundleName, "quickbrownfaux", nil)
 
 	if plugin.config.IsMultiBundle() {
 		t.Fatalf("Expected plugin to be in non-multi bundle config mode")
@@ -2473,8 +3925,8 @@ func TestUpgradeLegacyBundleToMuiltiBundleSameBundle(t *testing.T) {
 	plugin.oneShot(ctx, bundleName, download.Update{Bundle: &b})
 
 	// The only thing that should have changed is the store id for the policy
-	expIds = []string{"test-bundle/bundle/id1"}
-	validateStoreState(ctx, t, manager.Store, "/a", expData, expIds, bundleName, "quickbrownfaux-2", nil)
+	expIDs = []string{"test-bundle/bundle/id1"}
+	validateStoreState(ctx, t, manager.Store, "/a", expData, expIDs, bundleName, "quickbrownfaux-2", nil)
 
 	// Make sure the legacy path is gone now that we are in multi-bundle mode
 	var actual string
@@ -2571,8 +4023,8 @@ func TestUpgradeLegacyBundleToMultiBundleNewBundles(t *testing.T) {
 
 	// Ensure it has been activated
 	expData := util.MustUnmarshalJSON([]byte(`{"a2": "foo"}`))
-	expIds := []string{"bundle/id1"}
-	validateStoreState(ctx, t, manager.Store, "/a", expData, expIds, bundleName, "quickbrownfaux", nil)
+	expIDs := []string{"bundle/id1"}
+	validateStoreState(ctx, t, manager.Store, "/a", expData, expIDs, bundleName, "quickbrownfaux", nil)
 
 	if plugin.config.IsMultiBundle() {
 		t.Fatalf("Expected plugin to be in non-multi bundle config mode")
@@ -2612,8 +4064,8 @@ func TestUpgradeLegacyBundleToMultiBundleNewBundles(t *testing.T) {
 	plugin.oneShot(ctx, "b2", download.Update{Bundle: &b})
 
 	expData = util.MustUnmarshalJSON([]byte(`{"b2": "foo"}`))
-	expIds = []string{"b2/id1"}
-	validateStoreState(ctx, t, manager.Store, "/a", expData, expIds, "b2", "b2-1", nil)
+	expIDs = []string{"b2/id1"}
+	validateStoreState(ctx, t, manager.Store, "/a", expData, expIDs, "b2", "b2-1", nil)
 
 	// Make sure the legacy path is gone now that we are in multi-bundle mode
 	var actual string
@@ -2728,7 +4180,7 @@ func TestSaveBundleToDiskOverWrite(t *testing.T) {
 		t.Fatalf("unexpected error %v", err)
 	}
 
-	actual, err := loadBundleFromDisk(plugin.bundlePersistPath, "foo", nil)
+	actual, err := plugin.loadBundleFromDisk(plugin.bundlePersistPath, "foo", nil)
 	if err != nil {
 		t.Fatalf("unexpected error %v", err)
 	}
@@ -2763,8 +4215,11 @@ func TestSaveCurrentBundleToDisk(t *testing.T) {
 
 func TestLoadBundleFromDisk(t *testing.T) {
 
+	manager := getTestManager()
+	plugin := New(&Config{}, manager)
+
 	// no bundle on disk
-	_, err := loadBundleFromDisk("foo", "bar", nil)
+	_, err := plugin.loadBundleFromDisk("foo", "bar", nil)
 	if err != nil {
 		t.Fatalf("unexpected error %v", err)
 	}
@@ -2782,7 +4237,67 @@ func TestLoadBundleFromDisk(t *testing.T) {
 
 	b := writeTestBundleToDisk(t, bundleDir, false)
 
-	result, err := loadBundleFromDisk(dir, bundleName, nil)
+	result, err := plugin.loadBundleFromDisk(dir, bundleName, nil)
+	if err != nil {
+		t.Fatal("unexpected error:", err)
+	}
+
+	if !result.Equal(b) {
+		t.Fatal("expected the test bundle to be equal to the one loaded from disk")
+	}
+}
+
+func TestLoadBundleFromDiskV1Compatible(t *testing.T) {
+	popts := ast.ParserOptions{RegoVersion: ast.RegoV1}
+
+	manager, err := plugins.New(nil, "test-instance-id", inmem.New(), plugins.WithParserOptions(popts))
+	if err != nil {
+		t.Fatal("unexpected error:", err)
+	}
+	plugin := New(&Config{}, manager)
+
+	// create a test bundle and load it from disk
+	dir := t.TempDir()
+
+	bundleName := "foo"
+	bundleDir := filepath.Join(dir, bundleName)
+
+	err = os.MkdirAll(bundleDir, os.ModePerm)
+	if err != nil {
+		t.Fatalf("unexpected error %v", err)
+	}
+
+	// v1.0 policy
+	policy := `package test
+p contains 1 if {
+	input.x == 2
+}`
+
+	b := bundle.Bundle{
+		Manifest: bundle.Manifest{Revision: "test-revision"},
+		Modules: []bundle.ModuleFile{
+			{
+				URL:    `policy.rego`,
+				Path:   `/policy.rego`,
+				Raw:    []byte(policy),
+				Parsed: ast.MustParseModuleWithOpts(policy, popts),
+			},
+		},
+		Data: map[string]interface{}{},
+	}
+
+	b.Manifest.Init()
+
+	var buf bytes.Buffer
+	if err := bundle.NewWriter(&buf).UseModulePath(true).Write(b); err != nil {
+		t.Fatalf("unexpected error %v", err)
+	}
+
+	if err := os.WriteFile(filepath.Join(bundleDir, "bundle.tar.gz"), buf.Bytes(), 0644); err != nil {
+		t.Fatalf("unexpected error %v", err)
+	}
+
+	result, err := plugin.loadBundleFromDisk(dir, bundleName, nil)
 	if err != nil {
 		t.Fatal("unexpected error:", err)
 	}
@@ -2793,9 +4308,11 @@ func TestLoadBundleFromDisk(t *testing.T) {
 }
 
 func TestLoadSignedBundleFromDisk(t *testing.T) {
+	manager := getTestManager()
+	plugin := New(&Config{}, manager)
 
 	// no bundle on disk
-	_, err := loadBundleFromDisk("foo", "bar", nil)
+	_, err := plugin.loadBundleFromDisk("foo", "bar", nil)
 	if err != nil {
 		t.Fatalf("unexpected error %v", err)
 	}
@@ -2817,7 +4334,7 @@ func TestLoadSignedBundleFromDisk(t *testing.T) {
 		Signing: bundle.NewVerificationConfig(map[string]*keys.Config{"foo": {Key: "secret", Algorithm: "HS256"}}, "foo", "", nil),
 	}
 
-	result, err := loadBundleFromDisk(dir, bundleName, &src)
+	result, err := plugin.loadBundleFromDisk(dir, bundleName, &src)
 	if err != nil {
 		t.Fatal("unexpected error:", err)
 	}
@@ -2917,6 +4434,508 @@ func TestPluginUsingFileLoader(t *testing.T) {
 
 }
 
+func TestPluginUsingFileLoaderV1Compatible(t *testing.T) {
+	tests := []struct {
+		note         string
+		v1Compatible bool
+		module       string
+		expErrs      []string
+	}{
+		{
+			note: "v0.x, keywords not used",
+			module: `package test
+p[7] {
+	input.x == 2
+}`,
+		},
+		{
+			note: "v0.x, shadowed import",
+			module: `package test
+import future.keywords
+import data.foo
+import data.bar as foo
+p contains 7 if {
+	input.x == 2
+}`,
+		},
+		{
+			note: "v0.x, keywords not imported",
+			module: `package test
+p contains 7 if {
+	input.x == 2
+}`,
+			expErrs: []string{
+				"rego_parse_error: var cannot be used for rule name",
+				"rego_parse_error: number cannot be used for rule name",
+			},
+		},
+		{
+			note: "v0.x, keywords imported",
+			module: `package test
+import future.keywords
+p contains 7 if {
+	input.x == 2
+}`,
+		},
+		{
+			note: "v0.x, rego.ve imported",
+			module: `package test
+import rego.v1
+p contains 7 if {
+	input.x == 2
+}`,
+		},
+		// parse-time error
+		{
+			note:         "v1.0, keywords not used",
+			v1Compatible: true,
+			module: `package test
+p[7] {
+	input.x == 2
+}`,
+			expErrs: []string{
+				"rego_parse_error: `if` keyword is required before rule body",
+				"rego_parse_error: `contains` keyword is required for partial set rules",
+			},
+		},
+		// compile-time error
+		{
+			note:         "v1.0, shadowed import",
+			v1Compatible: true,
+			module: `package test
+import data.foo
+import data.bar as foo
+p contains 7 if {
+	input.x == 2
+}`,
+			expErrs: []string{
+				"rego_compile_error: import must not shadow import data.foo",
+			},
+		},
+		{
+			note:         "v1.0, keywords not imported",
+			v1Compatible: true,
+			module: `package test
+p contains 7 if {
+	input.x == 2
+}`,
+		},
+		{
+			note:         "v1.0, keywords imported",
+			v1Compatible: true,
+			module: `package test
+import future.keywords
+p contains 7 if {
+	input.x == 2
+}`,
+		},
+		{
+			note:         "v1.0, rego.ve imported",
+			v1Compatible: true,
+			module: `package test
+import rego.v1
+p contains 7 if {
+	input.x == 2
+}`,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.note, func(t *testing.T) {
+			regoVersion := ast.RegoV0
+			if tc.v1Compatible {
+				regoVersion = ast.RegoV1
+			}
+			popts := ast.ParserOptions{RegoVersion: regoVersion}
+
+			test.WithTempFS(map[string]string{}, func(dir string) {
+
+				b := bundle.Bundle{
+					Data: map[string]interface{}{},
+					Modules: []bundle.ModuleFile{
+						{
+							URL: "test.rego",
+							Raw: []byte(tc.module),
+						},
+					},
+				}
+
+				name := path.Join(dir, "bundle.tar.gz")
+
+				f, err := os.Create(name)
+				if err != nil {
+					t.Fatal(err)
+				}
+
+				if err := bundle.NewWriter(f).Write(b); err != nil {
+					t.Fatal(err)
+				}
+
+				f.Close()
+
+				manager, err := plugins.New(nil, "test-instance-id", inmem.New(), plugins.WithParserOptions(popts))
+				if err != nil {
+					t.Fatal("unexpected error:", err)
+				}
+				url := "file://" + name
+
+				p := New(&Config{Bundles: map[string]*Source{
+					"test": {
+						SizeLimitBytes: 1e5,
+						Resource:       url,
+					},
+				}}, manager)
+
+				ch := make(chan Status)
+
+				p.Register("test", func(s Status) {
+					ch <- s
+				})
+
+				if err := p.Start(context.Background()); err != nil {
+					t.Fatal(err)
+				}
+
+				s := <-ch
+
+				if tc.expErrs != nil {
+					for _, expErr := range tc.expErrs {
+						found := false
+						for _, e := range s.Errors {
+							if strings.Contains(e.Error(), expErr) {
+								found = true
+								break
+							}
+						}
+						if !found {
+							t.Fatalf("expected error:\n\n%s\n\nbut got:\n\n%v", expErr, s.Errors)
+						}
+					}
+				} else {
+					if s.LastSuccessfulActivation.IsZero() {
+						t.Fatal("expected successful activation")
+					}
+				}
+			})
+		})
+	}
+}
+
+func TestPluginUsingFileLoaderWithBundleRegoVersion(t *testing.T) {
+	tests := []struct {
+		note               string
+		managerRegoVersion ast.RegoVersion
+		bundleRegoVersion  ast.RegoVersion
+		module             string
+		expErrs            []string
+	}{
+		{
+			note:               "v0.x manager, v0.x bundle, keywords not used",
+			managerRegoVersion: ast.RegoV0,
+			bundleRegoVersion:  ast.RegoV0,
+			module: `package test
+p[7] {
+	input.x == 2
+}`,
+		},
+		{
+			note:               "v0.x manager, v0.x bundle, shadowed import",
+			managerRegoVersion: ast.RegoV0,
+			bundleRegoVersion:  ast.RegoV0,
+			module: `package test
+import future.keywords
+import data.foo
+import data.bar as foo
+p contains 7 if {
+	input.x == 2
+}`,
+		},
+		{
+			note:               "v0.x manager, v0.x bundle, keywords not imported",
+			managerRegoVersion: ast.RegoV0,
+			bundleRegoVersion:  ast.RegoV0,
+			module: `package test
+p contains 7 if {
+	input.x == 2
+}`,
+			expErrs: []string{
+				"rego_parse_error: var cannot be used for rule name",
+				"rego_parse_error: number cannot be used for rule name",
+			},
+		},
+		{
+			note:               "v0.x manager, v0.x bundle, keywords imported",
+			managerRegoVersion: ast.RegoV0,
+			bundleRegoVersion:  ast.RegoV0,
+			module: `package test
+import future.keywords
+p contains 7 if {
+	input.x == 2
+}`,
+		},
+		{
+			note:               "v0.x manager, v0.x bundle, rego.v1 imported",
+			managerRegoVersion: ast.RegoV0,
+			bundleRegoVersion:  ast.RegoV0,
+			module: `package test
+import rego.v1
+p contains 7 if {
+	input.x == 2
+}`,
+		},
+		// parse-time error
+		{
+			note:               "v0.x manager, v1.0 bundle, keywords not used",
+			managerRegoVersion: ast.RegoV0,
+			bundleRegoVersion:  ast.RegoV1,
+			module: `package test
+p[7] {
+	input.x == 2
+}`,
+			expErrs: []string{
+				"rego_parse_error: `if` keyword is required before rule body",
+				"rego_parse_error: `contains` keyword is required for partial set rules",
+			},
+		},
+		// compile-time error
+		{
+			note:               "v0.x manager, v1.0 bundle, shadowed import",
+			managerRegoVersion: ast.RegoV0,
+			bundleRegoVersion:  ast.RegoV1,
+			module: `package test
+import data.foo
+import data.bar as foo
+p contains 7 if {
+	input.x == 2
+}`,
+			expErrs: []string{
+				"rego_compile_error: import must not shadow import data.foo",
+			},
+		},
+		{
+			note:               "v0.x manager, v1.0 bundle, keywords not imported",
+			managerRegoVersion: ast.RegoV0,
+			bundleRegoVersion:  ast.RegoV1,
+			module: `package test
+p contains 7 if {
+	input.x == 2
+}`,
+		},
+		{
+			note:               "v0.x manager, v1.0 bundle, keywords imported",
+			managerRegoVersion: ast.RegoV0,
+			bundleRegoVersion:  ast.RegoV1,
+			module: `package test
+import future.keywords
+p contains 7 if {
+	input.x == 2
+}`,
+		},
+		{
+			note:               "v0.x manager, v1.0 bundle, rego.ve imported",
+			managerRegoVersion: ast.RegoV0,
+			bundleRegoVersion:  ast.RegoV1,
+			module: `package test
+import rego.v1
+p contains 7 if {
+	input.x == 2
+}`,
+		},
+
+		{
+			note:               "v1.0 manager, v0.x bundle, keywords not used",
+			managerRegoVersion: ast.RegoV1,
+			bundleRegoVersion:  ast.RegoV0,
+			module: `package test
+p[7] {
+	input.x == 2
+}`,
+		},
+		{
+			note:               "v1.0 manager, v0.x bundle, shadowed import",
+			managerRegoVersion: ast.RegoV1,
+			bundleRegoVersion:  ast.RegoV0,
+			module: `package test
+import future.keywords
+import data.foo
+import data.bar as foo
+p contains 7 if {
+	input.x == 2
+}`,
+		},
+		{
+			note:               "v1.0 manager, v0.x bundle, keywords not imported",
+			managerRegoVersion: ast.RegoV1,
+			bundleRegoVersion:  ast.RegoV0,
+			module: `package test
+p contains 7 if {
+	input.x == 2
+}`,
+			expErrs: []string{
+				"rego_parse_error: var cannot be used for rule name",
+				"rego_parse_error: number cannot be used for rule name",
+			},
+		},
+		{
+			note:               "v1.0 manager, v0.x bundle, keywords imported",
+			managerRegoVersion: ast.RegoV1,
+			bundleRegoVersion:  ast.RegoV0,
+			module: `package test
+import future.keywords
+p contains 7 if {
+	input.x == 2
+}`,
+		},
+		{
+			note:               "v1.0 manager, v0.x bundle, rego.v1 imported",
+			managerRegoVersion: ast.RegoV1,
+			bundleRegoVersion:  ast.RegoV0,
+			module: `package test
+import rego.v1
+p contains 7 if {
+	input.x == 2
+}`,
+		},
+		// parse-time error
+		{
+			note:               "v1.0 manager, v1.0 bundle, keywords not used",
+			managerRegoVersion: ast.RegoV1,
+			bundleRegoVersion:  ast.RegoV1,
+			module: `package test
+p[7] {
+	input.x == 2
+}`,
+			expErrs: []string{
+				"rego_parse_error: `if` keyword is required before rule body",
+				"rego_parse_error: `contains` keyword is required for partial set rules",
+			},
+		},
+		// compile-time error
+		{
+			note:               "v1.0 manager, v1.0 bundle, shadowed import",
+			managerRegoVersion: ast.RegoV1,
+			bundleRegoVersion:  ast.RegoV1,
+			module: `package test
+import data.foo
+import data.bar as foo
+p contains 7 if {
+	input.x == 2
+}`,
+			expErrs: []string{
+				"rego_compile_error: import must not shadow import data.foo",
+			},
+		},
+		{
+			note:               "v1.0 manager, v1.0 bundle, keywords not imported",
+			managerRegoVersion: ast.RegoV1,
+			bundleRegoVersion:  ast.RegoV1,
+			module: `package test
+p contains 7 if {
+	input.x == 2
+}`,
+		},
+		{
+			note:               "v1.0 manager, v1.0 bundle, keywords imported",
+			managerRegoVersion: ast.RegoV1,
+			bundleRegoVersion:  ast.RegoV1,
+			module: `package test
+import future.keywords
+p contains 7 if {
+	input.x == 2
+}`,
+		},
+		{
+			note:               "v1.0 manager, v1.0 bundle, rego.ve imported",
+			managerRegoVersion: ast.RegoV1,
+			bundleRegoVersion:  ast.RegoV1,
+			module: `package test
+import rego.v1
+p contains 7 if {
+	input.x == 2
+}`,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.note, func(t *testing.T) {
+			test.WithTempFS(map[string]string{}, func(dir string) {
+
+				manifest := bundle.Manifest{}
+				manifest.SetRegoVersion(tc.bundleRegoVersion)
+				b := bundle.Bundle{
+					Manifest: manifest,
+					Data:     map[string]interface{}{},
+					Modules: []bundle.ModuleFile{
+						{
+							URL: "test.rego",
+							Raw: []byte(tc.module),
+						},
+					},
+				}
+
+				name := path.Join(dir, "bundle.tar.gz")
+
+				f, err := os.Create(name)
+				if err != nil {
+					t.Fatal(err)
+				}
+
+				if err := bundle.NewWriter(f).Write(b); err != nil {
+					t.Fatal(err)
+				}
+
+				f.Close()
+
+				managerPopts := ast.ParserOptions{RegoVersion: tc.managerRegoVersion}
+				manager, err := plugins.New(nil, "test-instance-id", inmem.New(),
+					plugins.WithParserOptions(managerPopts))
+				if err != nil {
+					t.Fatal("unexpected error:", err)
+				}
+				url := "file://" + name
+
+				p := New(&Config{Bundles: map[string]*Source{
+					"test": {
+						SizeLimitBytes: 1e5,
+						Resource:       url,
+					},
+				}}, manager)
+
+				ch := make(chan Status)
+
+				p.Register("test", func(s Status) {
+					ch <- s
+				})
+
+				if err := p.Start(context.Background()); err != nil {
+					t.Fatal(err)
+				}
+
+				s := <-ch
+
+				if tc.expErrs != nil {
+					for _, expErr := range tc.expErrs {
+						found := false
+						for _, e := range s.Errors {
+							if strings.Contains(e.Error(), expErr) {
+								found = true
+								break
+							}
+						}
+						if !found {
+							t.Fatalf("expected error:\n\n%s\n\nbut got:\n\n%v", expErr, s.Errors)
+						}
+					}
+				} else {
+					if s.LastSuccessfulActivation.IsZero() {
+						t.Fatal("expected successful activation")
+					}
+				}
+			})
+		})
+	}
+}
+
 func TestPluginUsingDirectoryLoader(t *testing.T) {
 	test.WithTempFS(map[string]string{
 		"test.rego": `package test
@@ -2950,6 +4969,464 @@ func TestPluginUsingDirectoryLoader(t *testing.T) {
 			t.Fatal("expected successful activation")
 		}
 	})
+}
+
+func TestPluginUsingDirectoryLoaderV1Compatible(t *testing.T) {
+	tests := []struct {
+		note         string
+		v1Compatible bool
+		module       string
+		expErrs      []string
+	}{
+		{
+			note: "v0.x, keywords not used",
+			module: `package test
+p[7] {
+	input.x == 2
+}`,
+		},
+		{
+			note: "v0.x, shadowed import",
+			module: `package test
+import future.keywords
+import data.foo
+import data.bar as foo
+p contains 7 if {
+	input.x == 2
+}`,
+		},
+		{
+			note: "v0.x, keywords not imported",
+			module: `package test
+p contains 7 if {
+	input.x == 2
+}`,
+			expErrs: []string{
+				"rego_parse_error: var cannot be used for rule name",
+				"rego_parse_error: number cannot be used for rule name",
+			},
+		},
+		{
+			note: "v0.x, keywords imported",
+			module: `package test
+import future.keywords
+p contains 7 if {
+	input.x == 2
+}`,
+		},
+		{
+			note: "v0.x, rego.ve imported",
+			module: `package test
+import rego.v1
+p contains 7 if {
+	input.x == 2
+}`,
+		},
+		// parse-time error
+		{
+			note:         "v1.0, keywords not used",
+			v1Compatible: true,
+			module: `package test
+p[7] {
+	input.x == 2
+}`,
+			expErrs: []string{
+				"rego_parse_error: `if` keyword is required before rule body",
+				"rego_parse_error: `contains` keyword is required for partial set rules",
+			},
+		},
+		// compile-time error
+		{
+			note:         "v1.0, shadowed import",
+			v1Compatible: true,
+			module: `package test
+import data.foo
+import data.bar as foo
+p contains 7 if {
+	input.x == 2
+}`,
+			expErrs: []string{
+				"rego_compile_error: import must not shadow import data.foo",
+			},
+		},
+		{
+			note:         "v1.0, keywords not imported",
+			v1Compatible: true,
+			module: `package test
+p contains 7 if {
+	input.x == 2
+}`,
+		},
+		{
+			note:         "v1.0, keywords imported",
+			v1Compatible: true,
+			module: `package test
+import future.keywords
+p contains 7 if {
+	input.x == 2
+}`,
+		},
+		{
+			note:         "v1.0, rego.ve imported",
+			v1Compatible: true,
+			module: `package test
+import rego.v1
+p contains 7 if {
+	input.x == 2
+}`,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.note, func(t *testing.T) {
+			regoVersion := ast.RegoV0
+			if tc.v1Compatible {
+				regoVersion = ast.RegoV1
+			}
+			popts := ast.ParserOptions{RegoVersion: regoVersion}
+
+			test.WithTempFS(map[string]string{
+				"test.rego": tc.module,
+			}, func(dir string) {
+
+				manager, err := plugins.New(nil, "test-instance-id", inmem.New(), plugins.WithParserOptions(popts))
+				if err != nil {
+					t.Fatal("unexpected error:", err)
+				}
+				url := "file://" + dir
+
+				p := New(&Config{Bundles: map[string]*Source{
+					"test": {
+						SizeLimitBytes: 1e5,
+						Resource:       url,
+					},
+				}}, manager)
+
+				ch := make(chan Status)
+
+				p.Register("test", func(s Status) {
+					ch <- s
+				})
+
+				if err := p.Start(context.Background()); err != nil {
+					t.Fatal(err)
+				}
+
+				s := <-ch
+
+				if tc.expErrs != nil {
+					for _, expErr := range tc.expErrs {
+						found := false
+						for _, e := range s.Errors {
+							if strings.Contains(e.Error(), expErr) {
+								found = true
+								break
+							}
+						}
+						if !found {
+							t.Fatalf("expected error:\n\n%s\n\nbut got:\n\n%v", expErr, s.Errors)
+						}
+					}
+				} else {
+					if s.LastSuccessfulActivation.IsZero() {
+						t.Fatal("expected successful activation")
+					}
+				}
+			})
+		})
+	}
+}
+
+func TestPluginUsingDirectoryLoaderWithBundleRegoVersion(t *testing.T) {
+	tests := []struct {
+		note               string
+		managerRegoVersion ast.RegoVersion
+		bundleRegoVersion  ast.RegoVersion
+		module             string
+		expErrs            []string
+	}{
+		{
+			note:               "v0.x manager, v0.x bundle, keywords not used",
+			managerRegoVersion: ast.RegoV0,
+			bundleRegoVersion:  ast.RegoV0,
+			module: `package test
+p[7] {
+	input.x == 2
+}`,
+		},
+		{
+			note:               "v0.x manager, v0.x bundle, shadowed import",
+			managerRegoVersion: ast.RegoV0,
+			bundleRegoVersion:  ast.RegoV0,
+			module: `package test
+import future.keywords
+import data.foo
+import data.bar as foo
+p contains 7 if {
+	input.x == 2
+}`,
+		},
+		{
+			note:               "v0.x manager, v0.x bundle, keywords not imported",
+			managerRegoVersion: ast.RegoV0,
+			bundleRegoVersion:  ast.RegoV0,
+			module: `package test
+p contains 7 if {
+	input.x == 2
+}`,
+			expErrs: []string{
+				"rego_parse_error: var cannot be used for rule name",
+				"rego_parse_error: number cannot be used for rule name",
+			},
+		},
+		{
+			note:               "v0.x manager, v0.x bundle, keywords imported",
+			managerRegoVersion: ast.RegoV0,
+			bundleRegoVersion:  ast.RegoV0,
+			module: `package test
+import future.keywords
+p contains 7 if {
+	input.x == 2
+}`,
+		},
+		{
+			note:               "v0.x manager, v0.x bundle, rego.v1 imported",
+			managerRegoVersion: ast.RegoV0,
+			bundleRegoVersion:  ast.RegoV0,
+			module: `package test
+import rego.v1
+p contains 7 if {
+	input.x == 2
+}`,
+		},
+		// parse-time error
+		{
+			note:               "v0.x manager, v1.0 bundle, keywords not used",
+			managerRegoVersion: ast.RegoV0,
+			bundleRegoVersion:  ast.RegoV1,
+			module: `package test
+p[7] {
+	input.x == 2
+}`,
+			expErrs: []string{
+				"rego_parse_error: `if` keyword is required before rule body",
+				"rego_parse_error: `contains` keyword is required for partial set rules",
+			},
+		},
+		// compile-time error
+		{
+			note:               "v0.x manager, v1.0 bundle, shadowed import",
+			managerRegoVersion: ast.RegoV0,
+			bundleRegoVersion:  ast.RegoV1,
+			module: `package test
+import data.foo
+import data.bar as foo
+p contains 7 if {
+	input.x == 2
+}`,
+			expErrs: []string{
+				"rego_compile_error: import must not shadow import data.foo",
+			},
+		},
+		{
+			note:               "v0.x manager, v1.0 bundle, keywords not imported",
+			managerRegoVersion: ast.RegoV0,
+			bundleRegoVersion:  ast.RegoV1,
+			module: `package test
+p contains 7 if {
+	input.x == 2
+}`,
+		},
+		{
+			note:               "v0.x manager, v1.0 bundle, keywords imported",
+			managerRegoVersion: ast.RegoV0,
+			bundleRegoVersion:  ast.RegoV1,
+			module: `package test
+import future.keywords
+p contains 7 if {
+	input.x == 2
+}`,
+		},
+		{
+			note:               "v0.x manager, v1.0 bundle, rego.ve imported",
+			managerRegoVersion: ast.RegoV0,
+			bundleRegoVersion:  ast.RegoV1,
+			module: `package test
+import rego.v1
+p contains 7 if {
+	input.x == 2
+}`,
+		},
+
+		{
+			note:               "v1.0 manager, v0.x bundle, keywords not used",
+			managerRegoVersion: ast.RegoV1,
+			bundleRegoVersion:  ast.RegoV0,
+			module: `package test
+p[7] {
+	input.x == 2
+}`,
+		},
+		{
+			note:               "v1.0 manager, v0.x bundle, shadowed import",
+			managerRegoVersion: ast.RegoV1,
+			bundleRegoVersion:  ast.RegoV0,
+			module: `package test
+import future.keywords
+import data.foo
+import data.bar as foo
+p contains 7 if {
+	input.x == 2
+}`,
+		},
+		{
+			note:               "v1.0 manager, v0.x bundle, keywords not imported",
+			managerRegoVersion: ast.RegoV1,
+			bundleRegoVersion:  ast.RegoV0,
+			module: `package test
+p contains 7 if {
+	input.x == 2
+}`,
+			expErrs: []string{
+				"rego_parse_error: var cannot be used for rule name",
+				"rego_parse_error: number cannot be used for rule name",
+			},
+		},
+		{
+			note:               "v1.0 manager, v0.x bundle, keywords imported",
+			managerRegoVersion: ast.RegoV1,
+			bundleRegoVersion:  ast.RegoV0,
+			module: `package test
+import future.keywords
+p contains 7 if {
+	input.x == 2
+}`,
+		},
+		{
+			note:               "v1.0 manager, v0.x bundle, rego.v1 imported",
+			managerRegoVersion: ast.RegoV1,
+			bundleRegoVersion:  ast.RegoV0,
+			module: `package test
+import rego.v1
+p contains 7 if {
+	input.x == 2
+}`,
+		},
+		// parse-time error
+		{
+			note:               "v1.0 manager, v1.0 bundle, keywords not used",
+			managerRegoVersion: ast.RegoV1,
+			bundleRegoVersion:  ast.RegoV1,
+			module: `package test
+p[7] {
+	input.x == 2
+}`,
+			expErrs: []string{
+				"rego_parse_error: `if` keyword is required before rule body",
+				"rego_parse_error: `contains` keyword is required for partial set rules",
+			},
+		},
+		// compile-time error
+		{
+			note:               "v1.0 manager, v1.0 bundle, shadowed import",
+			managerRegoVersion: ast.RegoV1,
+			bundleRegoVersion:  ast.RegoV1,
+			module: `package test
+import data.foo
+import data.bar as foo
+p contains 7 if {
+	input.x == 2
+}`,
+			expErrs: []string{
+				"rego_compile_error: import must not shadow import data.foo",
+			},
+		},
+		{
+			note:               "v1.0 manager, v1.0 bundle, keywords not imported",
+			managerRegoVersion: ast.RegoV1,
+			bundleRegoVersion:  ast.RegoV1,
+			module: `package test
+p contains 7 if {
+	input.x == 2
+}`,
+		},
+		{
+			note:               "v1.0 manager, v1.0 bundle, keywords imported",
+			managerRegoVersion: ast.RegoV1,
+			bundleRegoVersion:  ast.RegoV1,
+			module: `package test
+import future.keywords
+p contains 7 if {
+	input.x == 2
+}`,
+		},
+		{
+			note:               "v1.0 manager, v1.0 bundle, rego.ve imported",
+			managerRegoVersion: ast.RegoV1,
+			bundleRegoVersion:  ast.RegoV1,
+			module: `package test
+import rego.v1
+p contains 7 if {
+	input.x == 2
+}`,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.note, func(t *testing.T) {
+			test.WithTempFS(map[string]string{
+				"test.rego": tc.module,
+				".manifest": fmt.Sprintf(`{"rego_version": %d}`, bundleRegoVersion(tc.bundleRegoVersion)),
+			}, func(dir string) {
+
+				managerPopts := ast.ParserOptions{RegoVersion: tc.managerRegoVersion}
+				manager, err := plugins.New(nil, "test-instance-id", inmem.New(),
+					plugins.WithParserOptions(managerPopts))
+				if err != nil {
+					t.Fatal("unexpected error:", err)
+				}
+				url := "file://" + dir
+
+				p := New(&Config{Bundles: map[string]*Source{
+					"test": {
+						SizeLimitBytes: 1e5,
+						Resource:       url,
+					},
+				}}, manager)
+
+				ch := make(chan Status)
+
+				p.Register("test", func(s Status) {
+					ch <- s
+				})
+
+				if err := p.Start(context.Background()); err != nil {
+					t.Fatal(err)
+				}
+
+				s := <-ch
+
+				if tc.expErrs != nil {
+					for _, expErr := range tc.expErrs {
+						found := false
+						for _, e := range s.Errors {
+							if strings.Contains(e.Error(), expErr) {
+								found = true
+								break
+							}
+						}
+						if !found {
+							t.Fatalf("expected error:\n\n%s\n\nbut got:\n\n%v", expErr, s.Errors)
+						}
+					}
+				} else {
+					if s.LastSuccessfulActivation.IsZero() {
+						t.Fatal("expected successful activation")
+					}
+				}
+			})
+		})
+	}
 }
 
 func TestPluginReadBundleEtagFromDiskStore(t *testing.T) {
@@ -3336,7 +5813,7 @@ func TestPluginManualTrigger(t *testing.T) {
 		Modules: []bundle.ModuleFile{},
 	}
 
-	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		err := bundle.NewWriter(w).Write(mockBundle)
 		if err != nil {
 			t.Fatal(err)
@@ -3436,7 +5913,7 @@ func TestPluginManualTriggerMultipleDiskStorage(t *testing.T) {
 		},
 	}
 
-	s1 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	s1 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		err := bundle.NewWriter(w).Write(mockBundle1)
 		if err != nil {
 			t.Fatal(err)
@@ -3451,7 +5928,7 @@ func TestPluginManualTriggerMultipleDiskStorage(t *testing.T) {
 		},
 	}
 
-	s2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	s2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		err := bundle.NewWriter(w).Write(mockBundle2)
 		if err != nil {
 			t.Fatal(err)
@@ -3576,7 +6053,7 @@ func TestPluginManualTriggerMultiple(t *testing.T) {
 		},
 	}
 
-	s1 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	s1 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		err := bundle.NewWriter(w).Write(mockBundle1)
 		if err != nil {
 			t.Fatal(err)
@@ -3591,7 +6068,7 @@ func TestPluginManualTriggerMultiple(t *testing.T) {
 		},
 	}
 
-	s2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	s2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		err := bundle.NewWriter(w).Write(mockBundle2)
 		if err != nil {
 			t.Fatal(err)
@@ -3672,7 +6149,7 @@ func TestPluginManualTriggerWithTimeout(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
 	defer cancel()
 
-	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	s := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
 		time.Sleep(3 * time.Second) // this should cause the context deadline to exceed
 	}))
 
@@ -3727,6 +6204,58 @@ func TestPluginManualTriggerWithTimeout(t *testing.T) {
 	}
 }
 
+func TestGetNormalizedBundleName(t *testing.T) {
+	cases := []struct {
+		input string
+		goos  string
+		exp   string
+	}{
+		{
+			input: "foo",
+			exp:   "foo",
+		},
+		{
+			input: "foo=bar",
+			exp:   "foo=bar",
+			goos:  "windows",
+		},
+		{
+			input: "c:/foo",
+			exp:   "c:/foo",
+		},
+		{
+			input: "c:/foo",
+			exp:   "c\\:\\/foo",
+			goos:  "windows",
+		},
+		{
+			input: "file:\"<>c:/a",
+			exp:   "file\\:\\\"\\<\\>c\\:\\/a",
+			goos:  "windows",
+		},
+		{
+			input: "|a?b*c",
+			exp:   "\\|a\\?b\\*c",
+			goos:  "windows",
+		},
+		{
+			input: "a?b=c",
+			exp:   "a\\?b=c",
+			goos:  "windows",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.input, func(t *testing.T) {
+			goos = tc.goos
+			actual := getNormalizedBundleName(tc.input)
+			if actual != tc.exp {
+				t.Fatalf("Want %v but got: %v", tc.exp, actual)
+			}
+		})
+	}
+}
+
 func writeTestBundleToDisk(t *testing.T, srcDir string, signed bool) bundle.Bundle {
 	t.Helper()
 
@@ -3753,7 +6282,11 @@ func writeTestBundleToDisk(t *testing.T, srcDir string, signed bool) bundle.Bund
 func getTestBundle(t *testing.T) bundle.Bundle {
 	t.Helper()
 
-	module := "package gork\np[x] { x = 1 }"
+	module := `package gork
+import rego.v1
+
+
+p contains x if { x = 1 }`
 
 	b := bundle.Bundle{
 		Manifest: bundle.Manifest{
@@ -3798,7 +6331,7 @@ func getTestRawBundle(t *testing.T) io.Reader {
 	return &buf
 }
 
-func validateStoreState(ctx context.Context, t *testing.T, store storage.Store, root string, expData interface{}, expIds []string, expBundleName string, expBundleRev string, expMetadata map[string]interface{}) {
+func validateStoreState(ctx context.Context, t *testing.T, store storage.Store, root string, expData interface{}, expIDs []string, expBundleName string, expBundleRev string, expMetadata map[string]interface{}) {
 	t.Helper()
 	if err := storage.Txn(ctx, store, storage.TransactionParams{}, func(txn storage.Transaction) error {
 		value, err := store.Read(ctx, txn, storage.MustParsePath(root))
@@ -3816,10 +6349,10 @@ func validateStoreState(ctx context.Context, t *testing.T, store storage.Store, 
 		}
 
 		sort.Strings(ids)
-		sort.Strings(expIds)
+		sort.Strings(expIDs)
 
-		if !reflect.DeepEqual(ids, expIds) {
-			return fmt.Errorf("Expected ids %v but got %v", expIds, ids)
+		if !reflect.DeepEqual(ids, expIDs) {
+			return fmt.Errorf("Expected ids %v but got %v", expIDs, ids)
 		}
 
 		rev, err := bundle.ReadBundleRevisionFromStore(ctx, store, txn, expBundleName)

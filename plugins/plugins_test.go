@@ -6,16 +6,23 @@ package plugins
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
+	"net/http/httptest"
 	"reflect"
 	"testing"
+	"time"
 
+	"github.com/open-policy-agent/opa/bundle"
 	internal_tracing "github.com/open-policy-agent/opa/internal/distributedtracing"
+	"github.com/open-policy-agent/opa/internal/file/archive"
 	"github.com/open-policy-agent/opa/internal/storage/mock"
 	"github.com/open-policy-agent/opa/logging"
 	"github.com/open-policy-agent/opa/logging/test"
 	"github.com/open-policy-agent/opa/plugins/rest"
+	"github.com/open-policy-agent/opa/storage"
 	inmem "github.com/open-policy-agent/opa/storage/inmem/test"
 	"github.com/open-policy-agent/opa/topdown/cache"
 	prom "github.com/prometheus/client_golang/prometheus"
@@ -184,6 +191,120 @@ func TestPluginStatusUpdateOnStartAndStop(t *testing.T) {
 	m.Stop(context.Background())
 }
 
+func TestManagerWithOPATelemetryUpdateLoop(t *testing.T) {
+	// test server
+	mux := http.NewServeMux()
+	ts := httptest.NewServer(mux)
+
+	versions := []string{}
+	mux.HandleFunc("/v1/version", func(w http.ResponseWriter, req *http.Request) {
+		var data map[string]string
+
+		body, err := io.ReadAll(req.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		err = json.Unmarshal(body, &data)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		versions = append(versions, data["min_compatible_version"])
+
+		w.WriteHeader(http.StatusOK)
+		bs, _ := json.Marshal(map[string]string{"foo": "bar"}) // dummy data
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(bs) // ignore error
+	})
+	defer ts.Close()
+
+	t.Setenv("OPA_TELEMETRY_SERVICE_URL", ts.URL)
+
+	ctx := context.Background()
+
+	m, err := New([]byte{}, "test", inmem.New(), WithEnableTelemetry(true))
+	if err != nil {
+		t.Fatalf("Unexpected error: %s", err)
+	}
+
+	defaultUploadIntervalSec = int64(1)
+
+	err = m.Start(context.Background())
+	if err != nil {
+		t.Fatalf("Unexpected error: %s", err)
+	}
+
+	// add a policy to the store to trigger a telemetry update (v0.36.0)
+	module := `package x
+				p := array.reverse([1,2,3])`
+
+	err = storage.Txn(ctx, m.Store, storage.WriteParams, func(txn storage.Transaction) error {
+		return m.Store.UpsertPolicy(ctx, txn, "policy.rego", []byte(module))
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	time.Sleep(2 * time.Second)
+
+	// add data to the store and verify there is no trigger for a telemetry update
+	err = storage.Txn(ctx, m.Store, storage.WriteParams, func(txn storage.Transaction) error {
+		return m.Store.Write(ctx, txn, storage.AddOp, storage.MustParsePath("/a"), `[2,1,3]`)
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// add a bundle with some policy to trigger a telemetry update (v0.46.0)
+	txn := storage.NewTransactionOrDie(ctx, m.Store, storage.WriteParams)
+
+	var archiveFiles = map[string]string{
+		"/a/b/c/data.json":   "[1,2,3]",
+		"/policy.rego":       "package foo\n import future.keywords.every",
+		"/roles/policy.rego": "package bar\n import future.keywords.if\n p.a.b.c.d if { true }",
+	}
+
+	files := make([][2]string, 0, len(archiveFiles))
+	for name, content := range archiveFiles {
+		files = append(files, [2]string{name, content})
+	}
+
+	buf := archive.MustWriteTarGz(files)
+	b, err := bundle.NewReader(buf).WithLazyLoadingMode(true).Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	iterator := bundle.NewIterator(b.Raw)
+
+	params := storage.WriteParams
+	params.BasePaths = []string{""}
+
+	err = m.Store.Truncate(ctx, txn, params, iterator)
+	if err != nil {
+		t.Fatalf("Unexpected truncate error: %v", err)
+	}
+
+	if err := m.Store.Commit(ctx, txn); err != nil {
+		t.Fatalf("Unexpected commit error: %v", err)
+	}
+
+	time.Sleep(2 * time.Second)
+
+	m.Stop(ctx)
+
+	exp := 2
+	if len(versions) != exp {
+		t.Fatalf("Expected number of server calls: %+v but got: %+v", exp, len(versions))
+	}
+
+	expVers := []string{"0.36.0", "0.46.0"}
+	if !reflect.DeepEqual(expVers, versions) {
+		t.Fatalf("Expected OPA versions: %+v but got: %+v", expVers, versions)
+	}
+}
+
 type testPlugin struct {
 	m *Manager
 }
@@ -275,7 +396,7 @@ func TestPluginManagerInitIdempotence(t *testing.T) {
 }
 
 func TestManagerWithCachingConfig(t *testing.T) {
-	m, err := New([]byte(`{"caching": {"inter_query_builtin_cache": {"max_size_bytes": 100}}}`), "test", inmem.New())
+	m, err := New([]byte(`{"caching": {"inter_query_builtin_cache": {"max_size_bytes": 100}, "inter_query_builtin_value_cache": {"max_num_entries": 100}}}`), "test", inmem.New())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -283,6 +404,8 @@ func TestManagerWithCachingConfig(t *testing.T) {
 	expected, _ := cache.ParseCachingConfig(nil)
 	limit := int64(100)
 	expected.InterQueryBuiltinCache.MaxSizeBytes = &limit
+	maxNumEntriesInterQueryValueCache := int(100)
+	expected.InterQueryBuiltinValueCache.MaxNumEntries = &maxNumEntriesInterQueryValueCache
 
 	if !reflect.DeepEqual(m.InterQueryBuiltinCacheConfig(), expected) {
 		t.Fatalf("want %+v got %+v", expected, m.interQueryBuiltinCacheConfig)
@@ -290,6 +413,12 @@ func TestManagerWithCachingConfig(t *testing.T) {
 
 	// config error
 	_, err = New([]byte(`{"caching": {"inter_query_builtin_cache": {"max_size_bytes": "100"}}}`), "test", inmem.New())
+	if err == nil {
+		t.Fatal("expected error but got nil")
+	}
+
+	// config error
+	_, err = New([]byte(`{"caching": {"inter_query_builtin_value_cache": {"max_num_entries": "100"}}}`), "test", inmem.New())
 	if err == nil {
 		t.Fatal("expected error but got nil")
 	}
@@ -318,7 +447,7 @@ type mockForInitStartOrdering struct {
 	Started bool
 }
 
-func (m *mockForInitStartOrdering) Start(ctx context.Context) error {
+func (m *mockForInitStartOrdering) Start(_ context.Context) error {
 	m.Started = true
 	if m.Manager.initialized {
 		return nil
@@ -415,7 +544,7 @@ func TestPluginManagerPrometheusRegister(t *testing.T) {
 }
 
 func TestPluginManagerTracerProvider(t *testing.T) {
-	_, tracerProvider, err := internal_tracing.Init(context.TODO(), []byte(`{ "distributed_tracing": { "type": "grpc" } }`), "test")
+	_, tracerProvider, _, err := internal_tracing.Init(context.TODO(), []byte(`{ "distributed_tracing": { "type": "grpc" } }`), "test")
 	if err != nil {
 		t.Fatal(err)
 	}

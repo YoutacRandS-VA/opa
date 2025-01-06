@@ -16,13 +16,13 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - name: Check out code
-        uses: actions/checkout@v4
+        uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332 # v4.1.7
 
       - name: Generate
         run: make clean generate
 
       - name: Upload generated artifacts
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@6f51ac03b9356f520e9adb1b1b7802705f340c2b # v4.5.0
         with:
           name: generated
           path: |
@@ -30,7 +30,7 @@ jobs:
             capabilities.json
 
   go-build:
-    name: Go Build (${{ matrix.os }}${{ matrix.arch && format(' {0}', matrix.arch) || '' }})
+    name: Go Build (${{ matrix.os }}${{ matrix.arch && format(' {0}', matrix.arch) || '' }}${{ matrix.go_tags }})
     runs-on: ${{ matrix.run }}
     needs: generate
     strategy:
@@ -45,42 +45,61 @@ jobs:
             run: ubuntu-22.04
             targets: ci-go-ci-build-linux-static
             arch: arm64
+          - os: linux
+            run: ubuntu-22.04
+            targets: ci-go-ci-build-linux-static
+            go_tags: GO_TAGS="-tags=opa_no_oci"
+            variant_name: opa_no_ci
+            arch: arm64
           - os: windows
             run: ubuntu-22.04
             targets: ci-go-ci-build-windows
+            arch: amd64
           - os: darwin
-            run: macos-latest
-            targets: ci-build-darwin ci-build-darwin-arm64-static
+            run: macos-13
+            targets: ci-build-darwin
+            arch: amd64
+          - os: darwin
+            run: macos-14
+            targets: ci-build-darwin-arm64-static
+            arch: arm64
     steps:
       - name: Check out code
-        uses: actions/checkout@v4
+        uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332 # v4.1.7
 
       - id: go_version
         name: Read go version
         run: echo "go_version=$(cat .go-version)" >> $GITHUB_OUTPUT
 
       - name: Install Go (${{ steps.go_version.outputs.go_version }})
-        uses: actions/setup-go@v4
+        uses: actions/setup-go@0a12ed9d6a96ab950c8f026ed9f722fe0da7ef32 # v5.0.2
         with:
           go-version: ${{ steps.go_version.outputs.go_version }}
         if: matrix.os == 'darwin'
 
       - name: Download generated artifacts
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.8
         with:
           name: generated
 
       - name: Build
-        run: make ${{ matrix.targets }}
+        run: make ${{ matrix.go_tags }} ${{ matrix.targets }}
         env:
           GOARCH: ${{ matrix.arch }}
         timeout-minutes: 30
 
-      - name: Upload binaries
-        uses: actions/upload-artifact@v3
-        if: always()
+      - name: Upload binaries - No Go tags
+        uses: actions/upload-artifact@6f51ac03b9356f520e9adb1b1b7802705f340c2b # v4.5.0
+        if: ${{ matrix.go_tags == '' }}
         with:
-          name: binaries
+          name: binaries-${{ matrix.os }}-${{ matrix.arch }}
+          path: _release
+
+      - name: Upload binaries - Go tag variants
+        uses: actions/upload-artifact@6f51ac03b9356f520e9adb1b1b7802705f340c2b # v4.5.0
+        if: ${{ matrix.go_tags != '' && matrix.variant_name != '' }}
+        with:
+          name: binaries-variant-${{ matrix.os }}-${{ matrix.arch }}-${{ matrix.variant_name }}
           path: _release
 
   go-test:
@@ -94,22 +113,22 @@ jobs:
           - os: linux
             run: ubuntu-22.04
           - os: darwin
-            run: macos-latest
+            run: macos-14
     steps:
       - name: Check out code
-        uses: actions/checkout@v4
+        uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332 # v4.1.7
 
       - id: go_version
         name: Read go version
         run: echo "go_version=$(cat .go-version)" >> $GITHUB_OUTPUT
 
       - name: Install Go (${{ steps.go_version.outputs.go_version }})
-        uses: actions/setup-go@v4
+        uses: actions/setup-go@0a12ed9d6a96ab950c8f026ed9f722fe0da7ef32 # v5.0.2
         with:
           go-version: ${{ steps.go_version.outputs.go_version }}
 
       - name: Download generated artifacts
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.8
         with:
           name: generated
 
@@ -122,11 +141,24 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - name: Check out code
-        uses: actions/checkout@v4
+        uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332 # v4.1.7
 
       - name: Golang Style and Lint Check
         run: make check
         timeout-minutes: 30
+
+  yaml-lint:
+    name: YAML Lint
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Check out code
+        uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332 # v4.1.7
+
+      - name: YAML Style and Lint Check
+        run: make check-yaml-tests
+        timeout-minutes: 30
+        env:
+          YAML_LINT_FORMAT: github
 
   wasm:
     name: WASM
@@ -134,10 +166,10 @@ jobs:
     needs: generate
     steps:
       - name: Check out code
-        uses: actions/checkout@v4
+        uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332 # v4.1.7
 
       - name: Check PR for changes to Wasm
-        uses: dorny/paths-filter@v2
+        uses: dorny/paths-filter@de90cc6fb38fc0963ad72b210f1f284cd68cea36 # v3.0.2
         id: changes
         with:
           filters: |
@@ -152,7 +184,7 @@ jobs:
               - 'test/cases/**'
 
       - name: Download generated artifacts
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.8
         with:
           name: generated
         if: steps.changes.outputs.wasm == 'true'
@@ -175,10 +207,10 @@ jobs:
     needs: generate
     steps:
       - name: Check out code
-        uses: actions/checkout@v4
+        uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332 # v4.1.7
 
       - name: Download generated artifacts
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.8
         with:
           name: generated
 
@@ -194,10 +226,10 @@ jobs:
     needs: generate
     steps:
       - name: Check out code
-        uses: actions/checkout@v4
+        uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332 # v4.1.7
 
       - name: Download generated artifacts
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.8
         with:
           name: generated
 
@@ -212,17 +244,18 @@ jobs:
     needs: go-build
     steps:
       - name: Check out code
-        uses: actions/checkout@v4
+        uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332 # v4.1.7
 
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@49b3bc8e6bdd4a60e6116a5414239cba5943d3cf # v3.2.0
         with:
           platforms: arm64
 
       - name: Download release binaries
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.8
         with:
-          name: binaries
+          pattern: binaries-*
+          merge-multiple: true
           path: _release
 
       - name: Test amd64 images
@@ -233,30 +266,44 @@ jobs:
         env:
           GOARCH: arm64
 
+  # Note(philipc): We only run the amd64 targets.
   smoke-test-binaries:
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.run }}
     needs: go-build
     strategy:
       matrix:
         include:
-          - os: ubuntu-22.04
+          - os: linux
+            run: ubuntu-22.04
             exec: opa_linux_amd64
-          - os: ubuntu-22.04
+            arch: amd64
+          - os: linux
+            run: ubuntu-22.04
             exec: opa_linux_amd64_static
+            arch: amd64
             wasm: disabled
-          - os: macos-latest
+          - os: darwin
+            run: macos-13
             exec: opa_darwin_amd64
-          - os: windows-latest
+            arch: amd64
+          - os: darwin
+            run: macos-14
+            exec: opa_darwin_arm64_static
+            arch: arm64
+            wasm: disabled
+          - os: windows
+            run: windows-latest
             exec: opa_windows_amd64.exe
+            arch: amd64
 
     steps:
       - name: Check out code
-        uses: actions/checkout@v4
+        uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332 # v4.1.7
 
       - name: Download release binaries
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.8
         with:
-          name: binaries
+          name: binaries-${{ matrix.os }}-${{ matrix.arch }}
           path: _release
 
       - name: Test binaries (Rego)
@@ -273,15 +320,15 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-22.04, macos-latest]
-        version: ["1.19"]
+        os: [ubuntu-22.04, macos-14]
+        version: ["1.21"]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332 # v4.1.7
       - name: Download generated artifacts
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.8
         with:
           name: generated
-      - uses: actions/setup-go@v4
+      - uses: actions/setup-go@0a12ed9d6a96ab950c8f026ed9f722fe0da7ef32 # v5.0.2
         with:
           go-version: ${{ matrix.version }}
       - run: make build
@@ -291,17 +338,16 @@ jobs:
         env:
           DOCKER_RUNNING: 0
 
-
   # Run PR metadata against Rego policies
   rego-check-pr:
     name: Rego PR checks
     runs-on: ubuntu-22.04
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332 # v4.1.7
 
       - name: Download OPA
-        uses: open-policy-agent/setup-opa@v2
+        uses: open-policy-agent/setup-opa@34a30e8a924d1b03ce2cf7abe97250bbb1f332b5 # v2.2.0
         with:
           version: edge
 
@@ -315,7 +361,7 @@ jobs:
         run: |
           curl --silent --fail --header 'Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}' -o files.json \
             https://api.github.com/repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/files
-          
+
           opa eval -d build/policy/files.rego -d build/policy/helpers.rego  --format values --input files.json \
             --fail-defined 'data.files.deny[message]'
         env:
@@ -326,10 +372,13 @@ jobs:
         if: ${{ failure() }}
 
       - name: Setup Hugo
-        uses: peaceiris/actions-hugo@v2
+        uses: peaceiris/actions-hugo@75d2e84710de30f6ff7268e08f310b60ef14033f # v3.0.0
         with:
           # keep this version in sync with the version in netlify.toml
-          hugo-version: '0.113.0'
+          # Note, that upgrading Hugo is tricky as all versions of the OPA docs need to work
+          # with the Hugo version used.
+          # see: https://github.com/open-policy-agent/opa/pull/7034
+          hugo-version: "0.113.0"
           extended: true
 
       - name: Build docs site and test integrations data

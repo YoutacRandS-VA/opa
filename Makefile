@@ -6,12 +6,13 @@ VERSION := $(shell ./build/get-build-version.sh)
 
 CGO_ENABLED ?= 1
 WASM_ENABLED ?= 1
+GOFLAGS ?= "-buildmode=exe"
 
 # See https://golang.org/cmd/go/#hdr-Build_modes:
 # > -buildmode=exe
 # > Build the listed main packages and everything they import into
 # > executables. Packages not named main are ignored.
-GO := CGO_ENABLED=$(CGO_ENABLED) GOFLAGS="-buildmode=exe" go
+GO := CGO_ENABLED=$(CGO_ENABLED) GOFLAGS="$(GOFLAGS)" go
 GO_TEST_TIMEOUT := -timeout 30m
 
 GOVERSION ?= $(shell cat ./.go-version)
@@ -27,7 +28,9 @@ ifeq ($(WASM_ENABLED),1)
 GO_TAGS = -tags=opa_wasm
 endif
 
-GOLANGCI_LINT_VERSION := v1.51.0
+GOLANGCI_LINT_VERSION := v1.59.1
+YAML_LINT_VERSION := 0.29.0
+YAML_LINT_FORMAT ?= auto
 
 DOCKER_RUNNING ?= $(shell docker ps >/dev/null 2>&1 && echo 1 || echo 0)
 
@@ -137,7 +140,7 @@ perf-noisy: generate
 
 .PHONY: wasm-sdk-e2e-test
 wasm-sdk-e2e-test: generate
-	$(GO) test $(GO_TAGS),slow,wasm_sdk_e2e $(GO_TEST_TIMEOUT) -v ./internal/wasm/sdk/test/e2e
+	$(GO) test $(GO_TAGS),slow,wasm_sdk_e2e $(GO_TEST_TIMEOUT) ./internal/wasm/sdk/test/e2e
 
 .PHONY: check
 check:
@@ -219,7 +222,7 @@ endif
 .PHONY: wasm-rego-test
 wasm-rego-test: generate
 ifeq ($(DOCKER_RUNNING), 1)
-	GOVERSION=$(GOVERSION) ./build/run-wasm-rego-tests.sh
+	GOVERSION=$(GOVERSION) DOCKER_UID=$(DOCKER_UID) DOCKER_GID=$(DOCKER_GID) ./build/run-wasm-rego-tests.sh
 else
 	@echo "Docker not installed or not running. Skipping Rego-WASM test."
 endif
@@ -331,27 +334,20 @@ image-quick-%: ensure-executable-bin
 ifneq ($(GOARCH),arm64) # build only static images for arm64
 	$(DOCKER) build \
 		-t $(DOCKER_IMAGE):$(VERSION) \
-		--build-arg BASE=cgr.dev/chainguard/glibc-dynamic \
+		--build-arg BASE=chainguard/glibc-dynamic \
 		--build-arg BIN_DIR=$(RELEASE_DIR) \
 		--platform linux/$* \
 		.
 	$(DOCKER) build \
 		-t $(DOCKER_IMAGE):$(VERSION)-debug \
-		--build-arg BASE=cgr.dev/chainguard/glibc-dynamic:latest-dev \
-		--build-arg BIN_DIR=$(RELEASE_DIR) \
-		--platform linux/$* \
-		.
-	$(DOCKER) build \
-		-t $(DOCKER_IMAGE):$(VERSION)-rootless \
-		--build-arg OPA_DOCKER_IMAGE_TAG=rootless \
-		--build-arg BASE=cgr.dev/chainguard/glibc-dynamic:latest \
+		--build-arg BASE=chainguard/glibc-dynamic:latest-dev \
 		--build-arg BIN_DIR=$(RELEASE_DIR) \
 		--platform linux/$* \
 		.
 endif
 	$(DOCKER) build \
 		-t $(DOCKER_IMAGE):$(VERSION)-static \
-		--build-arg BASE=cgr.dev/chainguard/static:latest \
+		--build-arg BASE=chainguard/static:latest \
 		--build-arg BIN_DIR=$(RELEASE_DIR) \
 		--build-arg BIN_SUFFIX=_static \
 		--platform linux/$* \
@@ -359,7 +355,7 @@ endif
 
 	$(DOCKER) build \
 		-t $(DOCKER_IMAGE):$(VERSION)-static-debug \
-		--build-arg BASE=cgr.dev/chainguard/busybox:latest-glibc \
+		--build-arg BASE=chainguard/busybox:latest-glibc \
 		--build-arg BIN_DIR=$(RELEASE_DIR) \
 		--build-arg BIN_SUFFIX=_static \
 		--platform linux/$* \
@@ -370,7 +366,7 @@ endif
 push-manifest-list-%: ensure-executable-bin
 	$(DOCKER) buildx build \
 		--tag $(DOCKER_IMAGE):$* \
-		--build-arg BASE=cgr.dev/chainguard/glibc-dynamic:latest \
+		--build-arg BASE=chainguard/glibc-dynamic:latest \
 		--build-arg BIN_DIR=$(RELEASE_DIR) \
 		--platform $(DOCKER_PLATFORMS) \
 		--provenance=false \
@@ -378,16 +374,7 @@ push-manifest-list-%: ensure-executable-bin
 		.
 	$(DOCKER) buildx build \
 		--tag $(DOCKER_IMAGE):$*-debug \
-		--build-arg BASE=cgr.dev/chainguard/glibc-dynamic:latest-dev \
-		--build-arg BIN_DIR=$(RELEASE_DIR) \
-		--platform $(DOCKER_PLATFORMS) \
-		--provenance=false \
-		--push \
-		.
-	$(DOCKER) buildx build \
-		--tag $(DOCKER_IMAGE):$*-rootless \
-		--build-arg OPA_DOCKER_IMAGE_TAG=rootless \
-		--build-arg BASE=cgr.dev/chainguard/glibc-dynamic:latest \
+		--build-arg BASE=chainguard/glibc-dynamic:latest-dev \
 		--build-arg BIN_DIR=$(RELEASE_DIR) \
 		--platform $(DOCKER_PLATFORMS) \
 		--provenance=false \
@@ -396,7 +383,7 @@ push-manifest-list-%: ensure-executable-bin
 
 	$(DOCKER) buildx build \
 		--tag $(DOCKER_IMAGE):$*-static \
-		--build-arg BASE=cgr.dev/chainguard/static:latest \
+		--build-arg BASE=chainguard/static:latest \
 		--build-arg BIN_DIR=$(RELEASE_DIR) \
 		--build-arg BIN_SUFFIX=_static \
 		--platform $(DOCKER_PLATFORMS_STATIC) \
@@ -406,7 +393,7 @@ push-manifest-list-%: ensure-executable-bin
 
 	$(DOCKER) buildx build \
 		--tag $(DOCKER_IMAGE):$*-static-debug \
-		--build-arg BASE=cgr.dev/chainguard/busybox:latest-glibc \
+		--build-arg BASE=chainguard/busybox:latest-glibc \
 		--build-arg BIN_DIR=$(RELEASE_DIR) \
 		--build-arg BIN_SUFFIX=_static \
 		--platform $(DOCKER_PLATFORMS_STATIC) \
@@ -488,6 +475,14 @@ check-go-module:
 	  --tmpfs /src/.go \
 	  $(RELEASE_BUILD_IMAGE) \
 	  /bin/bash -c "git config --system --add safe.directory /src && go mod vendor -v"
+
+.PHONY: check-yaml-tests
+check-yaml-tests:
+ifeq ($(DOCKER_RUNNING), 1)
+	docker run --rm -v $(shell pwd):/data:ro,Z -w /data pipelinecomponents/yamllint:${YAML_LINT_VERSION} yamllint -f $(YAML_LINT_FORMAT) test/cases/testdata
+else
+	@echo "Docker not installed or running. Skipping yamllint run."
+endif
 
 ######################################################
 #

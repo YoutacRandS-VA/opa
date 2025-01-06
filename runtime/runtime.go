@@ -23,20 +23,21 @@ import (
 
 	"github.com/fsnotify/fsnotify"
 	"github.com/gorilla/mux"
-	"github.com/open-policy-agent/opa/internal/compiler"
-	"github.com/open-policy-agent/opa/internal/pathwatcher"
-	"github.com/open-policy-agent/opa/internal/ref"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace"
 	"go.opentelemetry.io/otel/propagation"
 	"go.uber.org/automaxprocs/maxprocs"
 
+	"github.com/open-policy-agent/opa/ast"
 	"github.com/open-policy-agent/opa/bundle"
 	opa_config "github.com/open-policy-agent/opa/config"
+	"github.com/open-policy-agent/opa/internal/compiler"
 	"github.com/open-policy-agent/opa/internal/config"
 	internal_tracing "github.com/open-policy-agent/opa/internal/distributedtracing"
 	internal_logging "github.com/open-policy-agent/opa/internal/logging"
+	"github.com/open-policy-agent/opa/internal/pathwatcher"
 	"github.com/open-policy-agent/opa/internal/prometheus"
+	"github.com/open-policy-agent/opa/internal/ref"
 	"github.com/open-policy-agent/opa/internal/report"
 	"github.com/open-policy-agent/opa/internal/runtime"
 	initload "github.com/open-policy-agent/opa/internal/runtime/init"
@@ -115,6 +116,8 @@ type Params struct {
 
 	// CertPool holds the CA certs trusted by the OPA server.
 	CertPool *x509.CertPool
+	// CertPoolFile, if set permits the reloading of the CA cert pool from disk
+	CertPoolFile string
 
 	// MinVersion contains the minimum TLS version that is acceptable.
 	// If zero, TLS 1.2 is currently taken as the minimum.
@@ -224,6 +227,14 @@ type Params struct {
 
 	// UnixSocketPerm specifies the permission for the Unix domain socket if used to listen for connections
 	UnixSocketPerm *string
+
+	// V1Compatible will enable OPA features and behaviors that will be enabled by default in a future OPA v1.0 release.
+	// This flag allows users to opt-in to the new behavior and helps transition to the future release upon which
+	// the new behavior will be enabled by default.
+	V1Compatible bool
+
+	// CipherSuites specifies the list of enabled TLS 1.0–1.2 cipher suites
+	CipherSuites *[]uint16
 }
 
 // LoggingConfig stores the configuration for OPA's logging behaviour.
@@ -248,15 +259,17 @@ type Runtime struct {
 	Store   storage.Store
 	Manager *plugins.Manager
 
-	logger        logging.Logger
-	server        *server.Server
-	metrics       *prometheus.Provider
-	reporter      *report.Reporter
-	traceExporter *otlptrace.Exporter
+	logger            logging.Logger
+	server            *server.Server
+	metrics           *prometheus.Provider
+	reporter          *report.Reporter
+	traceExporter     *otlptrace.Exporter
+	loadedPathsResult *initload.LoadPathsResult
 
 	serverInitialized bool
 	serverInitMtx     sync.RWMutex
 	done              chan struct{}
+	repl              *repl.REPL
 }
 
 // NewRuntime returns a new Runtime object initialized with params. Clients must
@@ -326,7 +339,13 @@ func NewRuntime(ctx context.Context, params Params) (*Runtime, error) {
 		}
 	}
 
-	loaded, err := initload.LoadPaths(params.Paths, params.Filter, params.BundleMode, params.BundleVerificationConfig, params.SkipBundleVerification, false, nil, nil)
+	var regoVersion ast.RegoVersion
+	if params.V1Compatible {
+		regoVersion = ast.RegoV1
+	} else {
+		regoVersion = ast.RegoV0
+	}
+	loaded, err := initload.LoadPathsForRegoVersion(regoVersion, params.Paths, params.Filter, params.BundleMode, params.BundleVerificationConfig, params.SkipBundleVerification, false, false, nil, nil)
 	if err != nil {
 		return nil, fmt.Errorf("load error: %w", err)
 	}
@@ -372,7 +391,7 @@ func NewRuntime(ctx context.Context, params Params) (*Runtime, error) {
 		store = inmem.NewWithOpts(inmem.OptRoundTripOnWrite(false))
 	}
 
-	traceExporter, tracerProvider, err := internal_tracing.Init(ctx, config, params.ID)
+	traceExporter, tracerProvider, _, err := internal_tracing.Init(ctx, config, params.ID)
 	if err != nil {
 		return nil, fmt.Errorf("config error: %w", err)
 	}
@@ -397,7 +416,9 @@ func NewRuntime(ctx context.Context, params Params) (*Runtime, error) {
 		plugins.PrintHook(loggingPrintHook{logger: logger}),
 		plugins.WithRouter(params.Router),
 		plugins.WithPrometheusRegister(metrics),
-		plugins.WithTracerProvider(tracerProvider))
+		plugins.WithTracerProvider(tracerProvider),
+		plugins.WithEnableTelemetry(params.EnableVersionCheck),
+		plugins.WithParserOptions(ast.ParserOptions{RegoVersion: regoVersion}))
 	if err != nil {
 		return nil, fmt.Errorf("config error: %w", err)
 	}
@@ -412,7 +433,13 @@ func NewRuntime(ctx context.Context, params Params) (*Runtime, error) {
 		}
 	}
 
-	disco, err := discovery.New(manager, discovery.Factories(registeredPlugins), discovery.Metrics(metrics))
+	var bootConfig map[string]interface{}
+	err = util.Unmarshal(config, &bootConfig)
+	if err != nil {
+		return nil, fmt.Errorf("config error: %w", err)
+	}
+
+	disco, err := discovery.New(manager, discovery.Factories(registeredPlugins), discovery.Metrics(metrics), discovery.BootConfig(bootConfig))
 	if err != nil {
 		return nil, fmt.Errorf("config error: %w", err)
 	}
@@ -428,6 +455,7 @@ func NewRuntime(ctx context.Context, params Params) (*Runtime, error) {
 		reporter:          reporter,
 		serverInitialized: false,
 		traceExporter:     traceExporter,
+		loadedPathsResult: loaded,
 	}
 
 	return rt, nil
@@ -472,7 +500,7 @@ func (rt *Runtime) Serve(ctx context.Context) error {
 	}
 
 	serverInitializingMessage := "Initializing server."
-	if !rt.Params.AddrSetByUser {
+	if !rt.Params.AddrSetByUser && !rt.Params.V1Compatible {
 		serverInitializingMessage += " OPA is running on a public (0.0.0.0) network interface. Unless you intend to expose OPA outside of the host, binding to the localhost interface (--addr localhost:8181) is recommended. See https://www.openpolicyagent.org/docs/latest/security/#interface-binding"
 	}
 
@@ -515,13 +543,6 @@ func (rt *Runtime) Serve(ctx context.Context) error {
 			rt.logger.WithFields(map[string]interface{}{"err": err}).Error("Failed to start OpenTelemetry trace exporter.")
 			return err
 		}
-
-		defer func() {
-			err := rt.traceExporter.Shutdown(ctx)
-			if err != nil {
-				rt.logger.WithFields(map[string]interface{}{"err": err}).Error("Failed to shutdown OpenTelemetry trace exporter gracefully.")
-			}
-		}()
 	}
 
 	rt.server = server.New().
@@ -532,8 +553,8 @@ func (rt *Runtime) Serve(ctx context.Context) error {
 		WithPprofEnabled(rt.Params.PprofEnabled).
 		WithAddresses(*rt.Params.Addrs).
 		WithH2CEnabled(rt.Params.H2CEnabled).
+		// always use the initial values for the certificate and ca pool, reloading behavior is configured below
 		WithCertificate(rt.Params.Certificate).
-		WithCertificatePaths(rt.Params.CertificateFile, rt.Params.CertificateKeyFile, rt.Params.CertificateRefresh).
 		WithCertPool(rt.Params.CertPool).
 		WithAuthentication(rt.Params.Authentication).
 		WithAuthorization(rt.Params.Authorization).
@@ -542,6 +563,7 @@ func (rt *Runtime) Serve(ctx context.Context) error {
 		WithRuntime(rt.Manager.Info).
 		WithMetrics(rt.metrics).
 		WithMinTLSVersion(rt.Params.MinTLSVersion).
+		WithCipherSuites(rt.Params.CipherSuites).
 		WithDistributedTracingOpts(rt.Params.DistributedTracingOpts)
 
 	// If decision_logging plugin enabled, check to see if we opted in to the ND builtins cache.
@@ -557,6 +579,24 @@ func (rt *Runtime) Serve(ctx context.Context) error {
 		rt.server = rt.server.WithUnixSocketPermission(rt.Params.UnixSocketPerm)
 	}
 
+	// If a refresh period is set, then we will periodically reload the certificate and ca pool. Otherwise, we will only
+	// reload cert, key and ca pool files when they change on disk.
+	if rt.Params.CertificateRefresh > 0 {
+		rt.server = rt.server.WithCertRefresh(rt.Params.CertificateRefresh)
+	}
+
+	// if either the cert or the ca pool file is set then these fields will be set on the server and reloaded when they
+	// change on disk.
+	if rt.Params.CertificateFile != "" || rt.Params.CertPoolFile != "" {
+		rt.server = rt.server.WithTLSConfig(&server.TLSConfig{
+			CertFile:     rt.Params.CertificateFile,
+			KeyFile:      rt.Params.CertificateKeyFile,
+			CertPoolFile: rt.Params.CertPoolFile,
+		})
+	}
+
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	rt.server, err = rt.server.Init(ctx)
 	if err != nil {
 		rt.logger.WithFields(map[string]interface{}{"err": err}).Error("Unable to initialize server.")
@@ -670,7 +710,9 @@ func (rt *Runtime) StartREPL(ctx context.Context) {
 
 	banner := rt.getBanner()
 	repl := repl.New(rt.Store, rt.Params.HistoryPath, rt.Params.Output, rt.Params.OutputFormat, rt.Params.ErrorLimit, banner).
-		WithRuntime(rt.Manager.Info)
+		WithRuntime(rt.Manager.Info).
+		WithV1Compatible(rt.Params.V1Compatible).
+		WithInitBundles(rt.loadedPathsResult.Bundles)
 
 	if rt.Params.Watch {
 		if err := rt.startWatcher(ctx, rt.Params.Paths, onReloadPrinter(rt.Params.Output)); err != nil {
@@ -684,6 +726,8 @@ func (rt *Runtime) StartREPL(ctx context.Context) {
 			repl.SetOPAVersionReport(rt.checkOPAUpdate(ctx).Slice())
 		}()
 	}
+
+	rt.repl = repl
 	repl.Loop(ctx)
 }
 
@@ -781,13 +825,14 @@ func (rt *Runtime) readWatcher(ctx context.Context, watcher *fsnotify.Watcher, p
 
 func (rt *Runtime) processWatcherUpdate(ctx context.Context, paths []string, removed string) error {
 
-	return pathwatcher.ProcessWatcherUpdate(ctx, paths, removed, rt.Store, rt.Params.Filter, rt.Params.BundleMode, func(ctx context.Context, txn storage.Transaction, loaded *initload.LoadPathsResult) error {
+	return pathwatcher.ProcessWatcherUpdateForRegoVersion(ctx, rt.Manager.ParserOptions().RegoVersion, paths, removed, rt.Store, rt.Params.Filter, rt.Params.BundleMode, func(ctx context.Context, txn storage.Transaction, loaded *initload.LoadPathsResult) error {
 		_, err := initload.InsertAndCompile(ctx, initload.InsertAndCompileOptions{
-			Store:     rt.Store,
-			Txn:       txn,
-			Files:     loaded.Files,
-			Bundles:   loaded.Bundles,
-			MaxErrors: -1,
+			Store:         rt.Store,
+			Txn:           txn,
+			Files:         loaded.Files,
+			Bundles:       loaded.Bundles,
+			MaxErrors:     -1,
+			ParserOptions: rt.Manager.ParserOptions(),
 		})
 
 		return err
@@ -817,6 +862,13 @@ func (rt *Runtime) gracefulServerShutdown(s *server.Server) error {
 		return err
 	}
 	rt.logger.Info("Server shutdown.")
+
+	if rt.traceExporter != nil {
+		err = rt.traceExporter.Shutdown(ctx)
+		if err != nil {
+			rt.logger.WithFields(map[string]interface{}{"err": err}).Error("Failed to shutdown OpenTelemetry trace exporter gracefully.")
+		}
+	}
 	return nil
 }
 
